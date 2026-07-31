@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-web-ui",
+  "name": "lingshu-app",
   "version": "1.0.0",
   "description": "灵枢 - AI 路由与知识中枢",
   "type": "module",
@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "start": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server.js",
+    "start": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server-v2.js",
+    "dev:api": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server-v2.js",
     "electron:dev": "NODE_ENV=development electron electron/main.cjs",
     "electron:build": "npm run build && electron-builder",
     "electron:build:mac": "npm run build && electron-builder --mac",
@@ -17,11 +18,15 @@
   },
   "dependencies": {
     "@ant-design/icons": "^5.2.0",
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/lang-markdown": "^6.5.1",
+    "@uiw/react-codemirror": "^4.25.11",
     "antd": "^5.12.0",
     "axios": "^1.6.0",
     "cors": "^2.8.5",
     "dayjs": "^1.11.0",
     "express": "^4.18.0",
+    "markdown-it": "^14.3.0",
     "multer": "^2.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -42,7 +47,7 @@
     "vite": "^5.4.21"
   },
   "build": {
-    "appId": "com.openclaw.webui",
+    "appId": "com.lingshu.app",
     "productName": "灵枢",
     "directories": {
       "output": "dist-electron"
@@ -63,6 +68,9 @@
           ]
         }
       ],
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "灵枢需要使用麦克风录制会议音频并生成会议纪要。"
+      },
       "category": "public.app-category.productivity"
     },
     "win": {

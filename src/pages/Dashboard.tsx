@@ -10,6 +10,7 @@ import {
   Progress,
   Timeline,
   Badge,
+  List,
   Button,
   Space,
   Typography,
@@ -19,14 +20,15 @@ import {
   message
 } from 'antd'
 import {
-  DashboardOutlined,
+  DatabaseOutlined,
   RobotOutlined,
   ThunderboltOutlined,
   MessageOutlined,
   ClockCircleOutlined,
   CheckCircleOutlined,
   ExclamationCircleOutlined,
-  SyncOutlined
+  SyncOutlined,
+  FileTextOutlined
 } from '@ant-design/icons'
 import { normalizeAgentsFromConfig, type AgentStatus } from '../utils/agents'
 
@@ -64,12 +66,25 @@ interface SystemStats {
   memoryUsage: number
 }
 
+interface LogEntry {
+  id?: string
+  timestamp?: string
+  time?: string
+  level?: string
+  source?: string
+  message?: string
+  text?: string
+}
+
 const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [stats, setStats] = useState<SystemStats | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [recentActivity, setRecentActivity] = useState<any[]>([])
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [logStats, setLogStats] = useState({ total: 0, info: 0, warn: 0, error: 0 })
+  const [currentTime, setCurrentTime] = useState(new Date())
 
   const loadDashboardData = useCallback(async () => {
     try {
@@ -106,6 +121,20 @@ const Dashboard: React.FC = () => {
       if (activityRes.ok) {
         setRecentActivity(await activityRes.json())
       }
+
+      const logsRes = await fetch('/api/logs')
+      if (logsRes.ok) {
+        const data = await logsRes.json()
+        const entries = data.entries || data.logs || data || []
+        const nextLogs = Array.isArray(entries) ? entries : []
+        setLogs(nextLogs.slice(0, 50))
+        setLogStats({
+          total: nextLogs.length,
+          info: nextLogs.filter((entry: LogEntry) => entry.level === 'info').length,
+          warn: nextLogs.filter((entry: LogEntry) => entry.level === 'warn' || entry.level === 'warning').length,
+          error: nextLogs.filter((entry: LogEntry) => entry.level === 'error').length
+        })
+      }
     } catch (error) {
       console.error('加载数据失败:', error)
     } finally {
@@ -134,7 +163,18 @@ const Dashboard: React.FC = () => {
     }
   }, [loadDashboardData])
 
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 60000)
+    return () => clearInterval(timer)
+  }, [])
+
   const pollRef = { current: null as ReturnType<typeof setInterval> | null }
+
+  const services = [
+    { name: '前端界面', status: 'running', port: 'Vite/Electron' },
+    { name: '后端 API', status: stats ? 'running' : 'unknown', port: 'Express' },
+    { name: 'Markdown Vault', status: 'running', port: '本地文件系统' }
+  ]
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -306,6 +346,13 @@ const Dashboard: React.FC = () => {
     }
   ]
 
+  const logLevelColor = (level?: string) => {
+    if (level === 'error') return 'red'
+    if (level === 'warn' || level === 'warning') return 'orange'
+    if (level === 'info') return 'blue'
+    return 'default'
+  }
+
   if (loading) {
     return (
       <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
@@ -319,9 +366,12 @@ const Dashboard: React.FC = () => {
   return (
     <Layout style={{ minHeight: '100vh', background: '#f0f2f5', padding: '24px' }}>
       <Title level={2} style={{ marginBottom: 24 }}>
-        <DashboardOutlined style={{ marginRight: 12 }} />
-        Dashboard
+        <DatabaseOutlined style={{ marginRight: 12 }} />
+        系统概览
       </Title>
+      <Text type="secondary" style={{ display: 'block', marginTop: -16, marginBottom: 24 }}>
+        合并 Dashboard 与系统状态：统一查看 Agent、会话、Skills、资源、服务状态和最近日志。当前时间：{currentTime.toLocaleString('zh-CN')}
+      </Text>
 
       {/* 统计卡片 */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
@@ -378,6 +428,21 @@ const Dashboard: React.FC = () => {
             </Space>
           </Card>
         </Col>
+        <Col xs={24} sm={12} md={8} lg={6}>
+          <Card>
+            <Statistic
+              title="日志条目"
+              value={logStats.total}
+              prefix={<FileTextOutlined />}
+              valueStyle={{ color: logStats.error > 0 ? '#ff4d4f' : '#13c2c2' }}
+            />
+            <Space>
+              <Tag color="blue">INFO {logStats.info}</Tag>
+              <Tag color={logStats.warn > 0 ? 'orange' : 'default'}>WARN {logStats.warn}</Tag>
+              <Tag color={logStats.error > 0 ? 'red' : 'green'}>ERROR {logStats.error}</Tag>
+            </Space>
+          </Card>
+        </Col>
       </Row>
 
       {/* 内存告警 */}
@@ -396,6 +461,55 @@ const Dashboard: React.FC = () => {
           }
         />
       )}
+
+      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+        <Col xs={24} lg={10}>
+          <Card title="服务状态">
+            <List
+              dataSource={services}
+              renderItem={item => (
+                <List.Item>
+                  <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                    <Space>
+                      <Badge status={item.status === 'running' ? 'success' : 'warning'} text={item.name} />
+                      <Text type="secondary">{item.port}</Text>
+                    </Space>
+                    <Tag color={item.status === 'running' ? 'success' : 'warning'}>
+                      {item.status === 'running' ? '运行中' : '待确认'}
+                    </Tag>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} lg={14}>
+          <Card title="最近日志" extra={<Button icon={<SyncOutlined />} onClick={loadDashboardData}>刷新</Button>}>
+            {logs.length === 0 ? (
+              <Empty description="暂无日志数据" />
+            ) : (
+              <List
+                size="small"
+                dataSource={logs.slice(0, 8)}
+                renderItem={(entry: LogEntry) => (
+                  <List.Item style={{ padding: '4px 0' }}>
+                    <Space style={{ width: '100%' }} align="start">
+                      <Text type="secondary" style={{ minWidth: 132, fontSize: 12 }}>
+                        {(entry.timestamp || entry.time || '').substring(0, 19) || '-'}
+                      </Text>
+                      <Tag color={logLevelColor(entry.level)}>{(entry.level || 'log').toUpperCase()}</Tag>
+                      <Text style={{ fontSize: 12, wordBreak: 'break-word' }}>
+                        {entry.source && <Text type="secondary">[{entry.source}] </Text>}
+                        {entry.message || entry.text || '-'}
+                      </Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            )}
+          </Card>
+        </Col>
+      </Row>
 
       {/* Agent 列表 */}
       <Card 

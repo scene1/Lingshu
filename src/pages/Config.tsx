@@ -129,7 +129,7 @@ const Config: React.FC = () => {
       <h2 style={{ marginBottom: 24 }}>配置管理</h2>
       
       <Alert
-        message="修改配置后需要重启 OpenClaw 才能生效"
+        message="修改配置后需要重启灵枢运行时才会生效"
         type="info"
         showIcon
         style={{ marginBottom: 24 }}

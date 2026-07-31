@@ -40,7 +40,7 @@ const Notifications: React.FC = () => {
     {
       id: '3',
       title: '配置已保存',
-      content: 'openclaw.json 配置已成功保存',
+      content: '灵枢运行时配置已成功保存',
       type: 'info',
       timestamp: '2024-05-21 09:45',
       read: true

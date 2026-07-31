@@ -5,8 +5,8 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 // 暴露给前端的 API
 contextBridge.exposeInMainWorld('electronAPI', {
-  // 执行 OpenClaw 命令
-  exec: (command) => ipcRenderer.invoke('openclaw-exec', command),
+  // 旧接口保留返回形态，但不再允许渲染进程传入任意 shell 命令
+  exec: async () => ({ success: false, error: '任意命令执行已禁用，请使用后端 API 或受限 IPC' }),
   
   // 执行 Skill
   executeSkill: (skillName, params) => ipcRenderer.invoke('execute-skill', skillName, params),
@@ -24,14 +24,3 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isElectron: true,
   platform: process.platform
 })
-
-// 旧版兼容（直接挂载到 window）
-window.electron = {
-  exec: (command) => ipcRenderer.invoke('openclaw-exec', command),
-  executeSkill: (skillName, params) => ipcRenderer.invoke('execute-skill', skillName, params),
-  openExternal: (url) => ipcRenderer.invoke('open-external', url),
-  openApp: (appName) => ipcRenderer.invoke('open-app', appName),
-  getSystemInfo: () => ipcRenderer.invoke('get-system-info'),
-  isElectron: true,
-  platform: process.platform
-}

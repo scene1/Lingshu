@@ -18,7 +18,7 @@ const ChatDemo: React.FC = () => {
     {
       id: '1',
       role: 'assistant',
-      content: '你好！我是 OpenClaw 助手。输入 / 可以选择技能，输入 # 可以插入话题标签。',
+      content: '你好！我是灵枢助手。输入 / 可以选择技能，输入 # 可以插入话题标签。',
       timestamp: '09:25'
     }
   ])
@@ -85,7 +85,7 @@ const ChatDemo: React.FC = () => {
                 <div style={{ flex: 1 }}>
                   <div style={{ marginBottom: 4 }}>
                     <Text strong style={{ color: '#fff', marginRight: 8 }}>
-                      {msg.role === 'assistant' ? 'OpenClaw' : '用户'}
+                      {msg.role === 'assistant' ? '灵枢' : '用户'}
                     </Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       {msg.timestamp}

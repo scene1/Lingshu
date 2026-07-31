@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import {
   Input, Button, Space, Tag, Avatar, List,
   Tabs, Tooltip, message, Spin, Empty, Select,
-  Card, Typography, Dropdown
+  Card, Typography, Dropdown, Modal, Form, Alert
 } from 'antd'
 import {
   SendOutlined, PlusOutlined, DeleteOutlined,
@@ -38,6 +38,7 @@ interface GroupMessage {
 interface GroupSession {
   id: string
   name: string
+  mode?: 'sequential' | 'free' | 'all'
   participantCount: number
   messageCount: number
   createdAt: string
@@ -81,12 +82,16 @@ const GroupChat: React.FC = () => {
   const [availableModels, setAvailableModels] = useState<any[]>([])
   const [availableAgents, setAvailableAgents] = useState<any[]>([])
   const [editingName, setEditingName] = useState(false)
+  const [createModalVisible, setCreateModalVisible] = useState(false)
+  const [createParticipants, setCreateParticipants] = useState<Participant[]>([])
+  const [creatingSession, setCreatingSession] = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([])
   const [filePickMode, setFilePickMode] = useState<'attachment' | 'image' | 'document'>('attachment')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<any>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [createForm] = Form.useForm()
 
   useEffect(() => {
     loadSessions()
@@ -117,6 +122,7 @@ const GroupChat: React.FC = () => {
         setMessages(data.messages || [])
         setParticipants(data.participants || [{ agentId: 'Agent-1', model: '', provider: '', avatarColor: AGENT_COLORS[0] }])
         setSessionName(data.name || '群聊')
+        setMode(data.mode || 'all')
       }
     } catch (e) { console.warn('GroupChat error:', e) }
   }
@@ -147,25 +153,103 @@ const GroupChat: React.FC = () => {
     return found ? found.label : modelKey
   }
 
-  const handleNewSession = async () => {
+  const getDefaultModelKey = () => {
+    const withKey = availableModels.find(m => m.hasApiKey)
+    return withKey?.key || availableModels[0]?.key || ''
+  }
+
+  const getAgentLabel = (agentId: string) => {
+    const found = availableAgents.find((agent: any) => (agent.id || agent.name) === agentId)
+    return found?.name || found?.id || agentId
+  }
+
+  const buildParticipantForAgent = (agentId: string, index: number, source: Participant[] = createParticipants): Participant => {
+    const previous = source.find(item => item.agentId === agentId) || participants.find(item => item.agentId === agentId)
+    const model = previous?.model || getDefaultModelKey()
+    return {
+      agentId,
+      model,
+      provider: previous?.provider || model.split('/')[0] || '',
+      avatarColor: previous?.avatarColor || AGENT_COLORS[index % AGENT_COLORS.length]
+    }
+  }
+
+  const getParticipantsWithModel = (list = participants) => list.filter(p => p.agentId && p.model)
+
+  const getParticipantWarning = (list = participants) => {
+    if (list.length === 0) return '请至少添加一个 Agent 成员'
+    if (getParticipantsWithModel(list).length === 0) return '请至少为一个 Agent 成员选择模型'
+    return ''
+  }
+
+  const openCreateSessionModal = () => {
+    const initialParticipants = participants.length > 0
+      ? participants.map((item, index) => buildParticipantForAgent(item.agentId, index, participants))
+      : availableAgents.slice(0, 2).map((agent: any, index) => buildParticipantForAgent(agent.id || agent.name, index, []))
+    setCreateParticipants(initialParticipants)
+    createForm.setFieldsValue({
+      name: sessionName && sessionName !== '群聊' ? sessionName : '新群聊',
+      mode,
+      agentIds: initialParticipants.map(item => item.agentId)
+    })
+    setCreateModalVisible(true)
+  }
+
+  const handleCreateAgentSelectionChange = (agentIds: string[]) => {
+    const next = agentIds.map((agentId, index) => buildParticipantForAgent(agentId, index, createParticipants))
+    setCreateParticipants(next)
+  }
+
+  const handleCreateParticipantModelChange = (index: number, modelKey: string) => {
+    const next = [...createParticipants]
+    next[index] = {
+      ...next[index],
+      model: modelKey,
+      provider: modelKey.split('/')[0] || ''
+    }
+    setCreateParticipants(next)
+  }
+
+  const handleNewSession = async (values?: { name?: string; mode?: 'sequential' | 'free' | 'all' }) => {
+    const selectedParticipants = createParticipants
+    const warning = getParticipantWarning(selectedParticipants)
+    if (warning) {
+      message.warning(warning)
+      return
+    }
+
+    const nextName = values?.name || sessionName || '新群聊'
+    const nextMode = values?.mode || mode
+    setCreatingSession(true)
     try {
       const res = await fetch('/api/group-chat/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: sessionName || '新群聊', participants })
+        body: JSON.stringify({ name: nextName, mode: nextMode, participants: selectedParticipants })
       })
-      if (res.ok) {
-        const newSession = await res.json()
-        setSessions(prev => [newSession, ...prev])
-        setCurrentSessionId(newSession.id)
-        setMessages([])
-        setSessionName('新群聊')
-        setAttachments([])
-        // 清除草稿，并将当前 participants 保存到新创建的会话
-        sessionStorage.removeItem(DRAFT_KEY)
-        saveParticipantsToSession(newSession.id, participants)
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}))
+        message.error(errorData.error || errorData.message || `创建失败：HTTP ${res.status}`)
+        return
       }
-    } catch (_) { message.error('创建群聊失败') }
+      const newSession = await res.json()
+      setSessions(prev => [newSession, ...prev])
+      setCurrentSessionId(newSession.id)
+      setMessages([])
+      setSessionName(newSession.name || nextName)
+      setMode(newSession.mode || nextMode)
+      setParticipants(selectedParticipants)
+      setAttachments([])
+      setCreateModalVisible(false)
+      // 清除草稿，并将当前 participants 保存到新创建的会话
+      sessionStorage.removeItem(DRAFT_KEY)
+      saveParticipantsToSession(newSession.id, selectedParticipants)
+      message.success('协作房间已创建')
+    } catch (error: any) {
+      message.error(`创建群聊失败：${error.message || '请确认后端服务已重启'}`)
+    } finally {
+      setCreatingSession(false)
+    }
   }
 
   const handleDeleteSession = async (sessionId: string) => {
@@ -391,6 +475,10 @@ const GroupChat: React.FC = () => {
         label: a.name || a.id
       }))
 
+  const createAgentOptions = availableAgents.length > 0
+    ? availableAgents.map((agent: any) => ({ value: agent.id || agent.name, label: agent.name || agent.id }))
+    : participants.map(p => ({ value: p.agentId, label: p.agentId }))
+
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - 64px)', background: '#f5f7fa' }}>
       {/* 左侧面板 */}
@@ -401,9 +489,17 @@ const GroupChat: React.FC = () => {
             <span style={{ fontSize: 16, fontWeight: 'bold' }}>多 Agent 群聊</span>
           </div>
 
-          <Button type="primary" icon={<PlusOutlined />} block style={{ marginBottom: 16 }} onClick={handleNewSession}>
-            新建群聊
+          <Button type="primary" icon={<PlusOutlined />} block style={{ marginBottom: 16 }} onClick={openCreateSessionModal}>
+            新建协作房间
           </Button>
+
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="群聊 = 协作场景"
+            description="先在“配置”里选成员和模型，再创建房间；发送时会按全员、轮流或自由 @ 模式决定哪些 Agent 回复。"
+          />
 
           {/* 群聊列表 */}
           <Tabs defaultActiveKey="sessions" size="small" items={[
@@ -842,6 +938,80 @@ const GroupChat: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <Modal
+        title="新建多 Agent 协作房间"
+        open={createModalVisible}
+        onOk={() => createForm.submit()}
+        onCancel={() => setCreateModalVisible(false)}
+        okText="创建房间"
+        confirmLoading={creatingSession}
+        width={640}
+      >
+        <Alert
+          type={getParticipantWarning(createParticipants) ? 'warning' : 'success'}
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={getParticipantWarning(createParticipants) || '成员配置可用'}
+          description={`当前选择 ${createParticipants.length} 个成员，其中 ${getParticipantsWithModel(createParticipants).length} 个已选择模型。创建后仍可在左侧配置页继续调整。`}
+        />
+        <Form form={createForm} layout="vertical" onFinish={handleNewSession}>
+          <Form.Item
+            name="name"
+            label="房间名称"
+            rules={[{ required: true, message: '请输入房间名称' }]}
+          >
+            <Input placeholder="例如：产品方案评审、文档共创、技术辩论" />
+          </Form.Item>
+          <Form.Item
+            name="mode"
+            label="协作模式"
+            rules={[{ required: true }]}
+          >
+            <Select
+              options={[
+                { value: 'all', label: '全员发言：适合头脑风暴和多视角评审' },
+                { value: 'sequential', label: '轮流发言：适合结构化讨论和逐步推演' },
+                { value: 'free', label: '自由 @：适合只让指定 Agent 回复' }
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name="agentIds"
+            label="选择加入的 Agent"
+            rules={[{ required: true, message: '请选择至少一个 Agent' }]}
+          >
+            <Select
+              mode="multiple"
+              placeholder="选择哪些 Agent 加入这个房间"
+              options={createAgentOptions}
+              onChange={handleCreateAgentSelectionChange}
+              optionFilterProp="label"
+            />
+          </Form.Item>
+          <Card size="small" title="成员与模型">
+            <Space direction="vertical" style={{ width: '100%' }}>
+              {createParticipants.map((p, idx) => (
+                <Space key={`${p.agentId}-${idx}`} style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Avatar size="small" style={{ backgroundColor: p.avatarColor }}>{p.agentId.charAt(0)}</Avatar>
+                  <Text style={{ width: 140 }}>{getAgentLabel(p.agentId)}</Text>
+                  <Select
+                    size="small"
+                    style={{ flex: 1, minWidth: 280 }}
+                    value={p.model || undefined}
+                    options={modelOptions}
+                    placeholder="选择模型"
+                    onChange={value => handleCreateParticipantModelChange(idx, value)}
+                    optionFilterProp="label"
+                    showSearch
+                  />
+                </Space>
+              ))}
+              {createParticipants.length === 0 && <Empty description="请选择要加入的 Agent" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+            </Space>
+          </Card>
+        </Form>
+      </Modal>
     </div>
   )
 }

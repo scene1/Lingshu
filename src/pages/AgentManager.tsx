@@ -17,7 +17,10 @@ import {
   Descriptions,
   Tabs,
   List,
-  Typography
+  Typography,
+  Alert,
+  Row,
+  Col
 } from 'antd'
 import {
   RobotOutlined,
@@ -193,11 +196,11 @@ const AgentManager: React.FC = () => {
   }
 
   const handleStart = async (agentId: string) => {
-    message.info(`Agent ${agentId} 的运行状态由 OpenClaw 运行时控制，已保留配置不变`)
+    message.info(`Agent ${agentId} 的运行状态由灵枢运行时控制，已保留配置不变`)
   }
 
   const handleStop = async (agentId: string) => {
-    message.info(`Agent ${agentId} 的运行状态由 OpenClaw 运行时控制，已保留配置不变`)
+    message.info(`Agent ${agentId} 的运行状态由灵枢运行时控制，已保留配置不变`)
   }
 
   const handleSave = async (values: any) => {
@@ -208,7 +211,13 @@ const AgentManager: React.FC = () => {
         id: editingAgent?.id || values.id || `agent-${Date.now()}`,
         name: values.name,
         description: values.description,
-        model: values.model
+        model: values.model,
+        config: {
+          temperature: values.config?.temperature ?? 0.7,
+          maxTokens: values.config?.maxTokens ?? 4000,
+          systemPrompt: values.config?.systemPrompt || '',
+          skills: values.config?.skills || []
+        }
       }
 
       if (editingAgent) {
@@ -364,13 +373,42 @@ const AgentManager: React.FC = () => {
 
   return (
     <Layout style={{ minHeight: '100vh', background: '#f0f2f5', padding: '24px' }}>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="Agent 是角色与能力配置，不是一个独立运行进程"
+        description="这里管理的是灵枢内部可被对话、文档工作台、群聊和自动化流程引用的 Agent 角色：包括默认模型、系统提示词、采样参数和技能声明。真正承载运行、配置文件和连接状态的是“运行实例”。"
+      />
+
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        <Col span={8}>
+          <Card size="small">
+            <Text strong>角色定位</Text>
+            <div style={{ color: '#666', marginTop: 6 }}>定义 Agent 要扮演什么角色、默认用哪个模型。</div>
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small">
+            <Text strong>能力边界</Text>
+            <div style={{ color: '#666', marginTop: 6 }}>沉淀系统提示词、Skills 和文档/群聊中的使用策略。</div>
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card size="small">
+            <Text strong>被谁调用</Text>
+            <div style={{ color: '#666', marginTop: 6 }}>AI 对话、文档 Agent、多 Agent 群聊和后续工作流都会引用这里的角色。</div>
+          </Card>
+        </Col>
+      </Row>
+
       <Card
-        title={<Title level={3}><RobotOutlined style={{ marginRight: 12 }} />Agent 管理</Title>}
+        title={<Title level={3}><RobotOutlined style={{ marginRight: 12 }} />Agent 角色库</Title>}
         extra={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={loadAgents}>刷新</Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
-              新建 Agent
+              新建 Agent 角色
             </Button>
           </Space>
         }
@@ -386,13 +424,22 @@ const AgentManager: React.FC = () => {
 
       {/* 创建/编辑 Agent 弹窗 */}
       <Modal
-        title={editingAgent ? '编辑 Agent' : '新建 Agent'}
+        title={editingAgent ? '编辑 Agent 角色' : '新建 Agent 角色'}
         open={modalVisible}
         onOk={() => form.submit()}
         onCancel={() => setModalVisible(false)}
         width={700}
       >
         <Form form={form} onFinish={handleSave} layout="vertical">
+          {!editingAgent && (
+            <Form.Item
+              name="id"
+              label="Agent ID"
+              tooltip="可选。留空时自动生成，用作群聊、文档 Agent 和工作流引用的稳定标识。"
+            >
+              <Input placeholder="例如: researcher-agent" />
+            </Form.Item>
+          )}
           <Form.Item
             name="name"
             label="Agent 名称"

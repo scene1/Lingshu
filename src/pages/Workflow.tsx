@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import {
-  Card, Table, Button, Space, Tag, Modal, Form, Input, Select,
+  Alert, Card, Table, Button, Space, Tag, Modal, Form, Input, Select,
   message, Popconfirm, Row, Col
 } from 'antd'
 import {
@@ -81,7 +81,7 @@ const Workflow: React.FC = () => {
   const getDefaultWorkflows = (): Workflow[] => [
     {
       id: 'wf-daily-report',
-      name: '每日报告生成',
+      name: '示例：每日报告生成',
       description: '每天定时采集数据 → Agent 分析 → 生成报告 → 推送飞书',
       status: 'draft',
       mode: 'sequential',
@@ -103,7 +103,7 @@ const Workflow: React.FC = () => {
     },
     {
       id: 'wf-code-review',
-      name: '代码审查流水线',
+      name: '示例：代码审查流水线',
       description: '提交代码 → 并行审查（语法+安全+风格）→ 汇总结果',
       status: 'draft',
       mode: 'parallel',
@@ -129,7 +129,7 @@ const Workflow: React.FC = () => {
     },
     {
       id: 'wf-news-digest',
-      name: '新闻智能摘要',
+      name: '示例：新闻智能摘要',
       description: '抓取 RSS → 条件过滤 → 并行摘要 → 分类整理 → 推送',
       status: 'draft',
       mode: 'conditional',
@@ -212,10 +212,10 @@ const Workflow: React.FC = () => {
   const handleRun = async (id: string) => {
     try {
       await fetch(`/api/workflows/${id}/run`, { method: 'POST' })
-      message.success('工作流已启动')
+      message.info('已记录一次实验性运行，真实执行器尚未接入')
       loadWorkflows()
     } catch {
-      message.success('已提交执行')
+      message.info('已提交实验性运行')
     }
   }
 
@@ -324,8 +324,16 @@ const Workflow: React.FC = () => {
     <div>
       <h2 style={{ marginBottom: 16 }}>
         <BranchesOutlined style={{ marginRight: 8 }} />
-        工作流配置
+        自动化流程配置（实验）
       </h2>
+
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="实验性流程编排"
+        description="这里先用于沉淀流程模板、节点结构和触发设想；当前“运行”只记录状态，不等同于真实调度执行。后续需要接入任务队列、权限边界、节点执行器和运行日志后，再升级成自动化中心。"
+      />
 
       <Card
         extra={

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Table, Button, Space, Tag, Modal, Form, Input, Switch, message } from 'antd'
+import { Alert, Card, Table, Button, Space, Tag, Modal, Form, Input, Switch, message } from 'antd'
 import {
   ReloadOutlined, EditOutlined, ApiOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LinkOutlined
@@ -39,8 +39,8 @@ const isWeChat = (c: Channel): c is WeChatChannel => c.type === 'wechat' || c.ty
 
 const CHANNEL_DEFAULTS: Channel[] = [
   {
-    id: 'weixin', name: '微信', icon: '💬', enabled: true,
-    status: 'connected', lastActive: '5分钟前', messageCount: 856,
+    id: 'weixin', name: '微信', icon: '💬', enabled: false,
+    status: 'disconnected', lastActive: '从未连接', messageCount: 0,
     type: 'wechat', corpId: '', agentId: '', secret: '', token: '', aesKey: '',
   },
   {
@@ -49,15 +49,15 @@ const CHANNEL_DEFAULTS: Channel[] = [
     type: 'wecom', corpId: '', agentId: '', secret: '', token: '', aesKey: '',
   },
   {
-    id: 'feishu', name: '飞书', icon: '📨', enabled: true,
-    appId: 'cli_a939d4facc395bef', appSecret: '••••••••••••••••',
-    webhook: '', status: 'connected', lastActive: '2分钟前', messageCount: 1240,
+    id: 'feishu', name: '飞书', icon: '📨', enabled: false,
+    appId: '', appSecret: '',
+    webhook: '', status: 'disconnected', lastActive: '从未连接', messageCount: 0,
     type: 'generic',
   },
   {
-    id: 'qqbot', name: 'QQ', icon: '🐧', enabled: true,
-    appId: '1903749752', appSecret: '••••••••••••••••',
-    webhook: '', status: 'connected', lastActive: '10分钟前', messageCount: 332,
+    id: 'qqbot', name: 'QQ', icon: '🐧', enabled: false,
+    appId: '', appSecret: '',
+    webhook: '', status: 'disconnected', lastActive: '从未连接', messageCount: 0,
     type: 'generic',
   },
   {
@@ -232,7 +232,7 @@ const ChannelManager: React.FC = () => {
 
   const getStatusTag = (status: string) => {
     switch (status) {
-      case 'connected': return <Tag icon={<CheckCircleOutlined />} color="success">已连接</Tag>
+      case 'connected': return <Tag icon={<CheckCircleOutlined />} color="processing">已启用（未验证）</Tag>
       case 'disconnected': return <Tag icon={<CloseCircleOutlined />} color="default">未连接</Tag>
       case 'error': return <Tag icon={<CloseCircleOutlined />} color="error">错误</Tag>
       default: return <Tag>{status}</Tag>
@@ -381,6 +381,14 @@ const ChannelManager: React.FC = () => {
           </span>
         </Space>
       </Card>
+
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="实验性配置页"
+        description="这里先作为渠道凭证和开关的统一配置入口；页面状态只代表是否启用配置，不代表后端已经完成真实接入或连通性验证。后续需要补齐各渠道 Adapter、回调验签、消息入站队列和发送审计后，再升级成生产入口。"
+      />
 
       <Card
         extra={

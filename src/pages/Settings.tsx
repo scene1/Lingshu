@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import {
   Layout, Tabs, Card, Form, Select, Switch, Button,
   Typography, Space, Tag, Divider, message, Modal, Input,
-  List, Spin, Statistic, InputNumber
+  List, Spin, Statistic, InputNumber, Checkbox
 } from 'antd'
 import {
   SettingOutlined, RobotOutlined, DatabaseOutlined,
@@ -28,16 +28,52 @@ const Settings: React.FC = () => {
   const [resetConfirmVisible, setResetConfirmVisible] = useState(false)
   const [obsidianStatus, setObsidianStatus] = useState<any>(null)
   const [testingObsidian, setTestingObsidian] = useState(false)
+  const [memorySyncItems, setMemorySyncItems] = useState<any[]>([])
+  const [selectedMemoryKeys, setSelectedMemoryKeys] = useState<string[]>([])
+  const [loadingMemorySync, setLoadingMemorySync] = useState(false)
+  const [syncingMemory, setSyncingMemory] = useState(false)
+  const [memorySyncQuery, setMemorySyncQuery] = useState('')
+  const [memorySyncAgentFilter, setMemorySyncAgentFilter] = useState('all')
+  const [memorySyncStatusFilter, setMemorySyncStatusFilter] = useState<'all' | 'unsynced' | 'synced'>('unsynced')
+  const [includeSyncedMemory, setIncludeSyncedMemory] = useState(false)
+  const [memorySyncPreviewVisible, setMemorySyncPreviewVisible] = useState(false)
+  const [pendingMemorySyncKeys, setPendingMemorySyncKeys] = useState<string[]>([])
+  const [archivingConversations, setArchivingConversations] = useState(false)
+  const [conversationArchiveResult, setConversationArchiveResult] = useState<any>(null)
   const [agentWorkspace, setAgentWorkspace] = useState('')
   const [savingWorkspace, setSavingWorkspace] = useState(false)
   const [form] = Form.useForm()
   const { updateSettings } = useSettings()
+  const filteredMemorySyncItems = memorySyncItems.filter(item => {
+    const synced = !!item.syncedToObsidian?.relativePath
+    if (memorySyncStatusFilter === 'unsynced' && synced) return false
+    if (memorySyncStatusFilter === 'synced' && !synced) return false
+    if (memorySyncAgentFilter !== 'all' && item.agent !== memorySyncAgentFilter) return false
+    const query = memorySyncQuery.trim().toLowerCase()
+    if (!query) return true
+    const text = [
+      item.key,
+      item.agent,
+      item.timestamp,
+      typeof item.value === 'string' ? item.value : JSON.stringify(item.value || {})
+    ].join('\n').toLowerCase()
+    return text.includes(query)
+  })
+  const unsyncedMemoryItems = filteredMemorySyncItems.filter(item => !item.syncedToObsidian?.relativePath)
+  const shownMemorySyncItems = filteredMemorySyncItems.slice(0, 12)
+  const memorySyncAgentOptions = [
+    { label: '全部 Agent', value: 'all' },
+    ...[...new Set(memorySyncItems.map(item => item.agent).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
+      .map(agent => ({ label: agent, value: agent }))
+  ]
 
   useEffect(() => {
     loadSettings()
     loadModels()
     loadConfigs()
     loadObsidianStatus()
+    loadMemorySyncStatus()
   }, [])
 
   const loadSettings = async () => {
@@ -197,6 +233,80 @@ const Settings: React.FC = () => {
     setTestingObsidian(false)
   }
 
+  const loadMemorySyncStatus = async () => {
+    setLoadingMemorySync(true)
+    try {
+      const res = await fetch('/api/memory/sync-to-obsidian')
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '读取失败')
+      setMemorySyncItems(Array.isArray(data.memories) ? data.memories : [])
+    } catch (error: any) {
+      console.warn('读取记忆同步状态失败:', error)
+    } finally {
+      setLoadingMemorySync(false)
+    }
+  }
+
+  const syncMemoryToObsidian = async (keys: string[], includeSynced = false) => {
+    setSyncingMemory(true)
+    try {
+      const res = await fetch('/api/memory/sync-to-obsidian', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys, includeSynced })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '同步失败')
+      message.success(`已同步 ${data.synced?.length || 0} 条记忆${data.skipped?.length ? `，跳过 ${data.skipped.length} 条` : ''}`)
+      setSelectedMemoryKeys([])
+      setPendingMemorySyncKeys([])
+      setMemorySyncPreviewVisible(false)
+      await loadMemorySyncStatus()
+    } catch (error: any) {
+      message.error(error.message || '同步记忆失败')
+    } finally {
+      setSyncingMemory(false)
+    }
+  }
+
+  const getMemorySyncKeys = (mode: 'filtered' | 'selected') => {
+    const source = mode === 'selected'
+      ? memorySyncItems.filter(item => selectedMemoryKeys.includes(item.key))
+      : filteredMemorySyncItems
+    return source
+      .filter(item => includeSyncedMemory || !item.syncedToObsidian?.relativePath)
+      .map(item => item.key)
+  }
+
+  const openMemorySyncPreview = (mode: 'filtered' | 'selected') => {
+    const keys = getMemorySyncKeys(mode)
+    if (keys.length === 0) {
+      message.info(includeSyncedMemory ? '没有符合筛选条件的记忆。' : '没有符合筛选条件的未同步记忆。')
+      return
+    }
+    setPendingMemorySyncKeys(keys)
+    setMemorySyncPreviewVisible(true)
+  }
+
+  const archiveConversationsToObsidian = async () => {
+    setArchivingConversations(true)
+    try {
+      const res = await fetch('/api/conversations/archive-to-obsidian', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ includeEmpty: false })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '归档失败')
+      setConversationArchiveResult(data)
+      message.success(`已归档 ${data.archived?.length || 0} 个会话，跳过 ${data.skipped?.length || 0} 个`)
+    } catch (error: any) {
+      message.error(error.message || '归档会话失败')
+    } finally {
+      setArchivingConversations(false)
+    }
+  }
+
   // 清除缓存
   const handleClearCache = async () => {
     try {
@@ -222,7 +332,7 @@ const Settings: React.FC = () => {
       const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = `openclaw-backup-${new Date().toISOString().slice(0, 10)}.json`
+      a.href = url; a.download = `lingshu-backup-${new Date().toISOString().slice(0, 10)}.json`
       a.click(); URL.revokeObjectURL(url)
       message.success('导出成功')
     } catch (_) { message.error('导出失败') }
@@ -539,6 +649,165 @@ const Settings: React.FC = () => {
                 : obsidianStatus.reason || '尚未连接 Obsidian Vault。'}
             </Paragraph>
           )}
+          <Divider style={{ margin: '8px 0' }} />
+          <Card size="small" title="手动同步记忆到知识库">
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Space wrap>
+                <Input.Search
+                  allowClear
+                  size="small"
+                  placeholder="按 key / 内容搜索"
+                  value={memorySyncQuery}
+                  onChange={event => setMemorySyncQuery(event.target.value)}
+                  style={{ width: 220 }}
+                />
+                <Select
+                  size="small"
+                  value={memorySyncAgentFilter}
+                  onChange={setMemorySyncAgentFilter}
+                  options={memorySyncAgentOptions}
+                  style={{ width: 160 }}
+                />
+                <Select
+                  size="small"
+                  value={memorySyncStatusFilter}
+                  onChange={setMemorySyncStatusFilter}
+                  options={[
+                    { label: '仅未同步', value: 'unsynced' },
+                    { label: '仅已同步', value: 'synced' },
+                    { label: '全部状态', value: 'all' }
+                  ]}
+                  style={{ width: 120 }}
+                />
+                <Checkbox
+                  checked={includeSyncedMemory}
+                  onChange={event => setIncludeSyncedMemory(event.target.checked)}
+                >
+                  允许重复同步已同步项
+                </Checkbox>
+              </Space>
+              <Space wrap>
+                <Tag color="blue">筛选 {filteredMemorySyncItems.length} / 共 {memorySyncItems.length} 条</Tag>
+                <Tag color={unsyncedMemoryItems.length ? 'gold' : 'green'}>未同步 {unsyncedMemoryItems.length} 条</Tag>
+                <Button size="small" onClick={loadMemorySyncStatus} loading={loadingMemorySync}>刷新</Button>
+                <Button
+                  size="small"
+                  type="primary"
+                  disabled={getMemorySyncKeys('filtered').length === 0}
+                  loading={syncingMemory}
+                  onClick={() => openMemorySyncPreview('filtered')}
+                >
+                  同步当前筛选
+                </Button>
+                <Button
+                  size="small"
+                  disabled={selectedMemoryKeys.length === 0}
+                  loading={syncingMemory}
+                  onClick={() => openMemorySyncPreview('selected')}
+                >
+                  同步选中
+                </Button>
+              </Space>
+              <Spin spinning={loadingMemorySync}>
+                {shownMemorySyncItems.length > 0 ? (
+                  <List
+                    size="small"
+                    dataSource={shownMemorySyncItems}
+                    renderItem={item => {
+                      const checked = selectedMemoryKeys.includes(item.key)
+                      const synced = !!item.syncedToObsidian?.relativePath
+                      return (
+                        <List.Item>
+                          <Space align="start" style={{ width: '100%' }}>
+                            <Checkbox
+                              checked={checked}
+                              onChange={event => {
+                                setSelectedMemoryKeys(prev => event.target.checked
+                                  ? [...new Set([...prev, item.key])]
+                                  : prev.filter(key => key !== item.key))
+                              }}
+                            />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <Space size={6} wrap>
+                                <Text strong ellipsis style={{ maxWidth: 260 }}>{item.key}</Text>
+                                {item.agent && <Tag>{item.agent}</Tag>}
+                                {synced ? <Tag color="green">已同步</Tag> : <Tag color="gold">未同步</Tag>}
+                              </Space>
+                              <Paragraph type="secondary" ellipsis={{ rows: 2 }} style={{ margin: '4px 0 0' }}>
+                                {typeof item.value === 'string' ? item.value : JSON.stringify(item.value)}
+                              </Paragraph>
+                              {synced && (
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  {item.syncedToObsidian.relativePath}
+                                </Text>
+                              )}
+                            </div>
+                          </Space>
+                        </List.Item>
+                      )
+                    }}
+                  />
+                ) : (
+                  <Paragraph type="secondary" style={{ margin: 0 }}>暂无可同步记忆。</Paragraph>
+                )}
+              </Spin>
+              {filteredMemorySyncItems.length > shownMemorySyncItems.length && (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  仅展示当前筛选的最近 {shownMemorySyncItems.length} 条；“同步当前筛选”会处理全部匹配项。
+                </Text>
+              )}
+              <Modal
+                title="确认同步记忆到知识库"
+                open={memorySyncPreviewVisible}
+                onCancel={() => setMemorySyncPreviewVisible(false)}
+                onOk={() => syncMemoryToObsidian(pendingMemorySyncKeys, includeSyncedMemory)}
+                confirmLoading={syncingMemory}
+                okText="确认同步"
+                cancelText="取消"
+              >
+                <Paragraph type="secondary">
+                  将同步 {pendingMemorySyncKeys.length} 条记忆到 Obsidian Vault 的 灵枢/Memory/Facts 目录。
+                </Paragraph>
+                <List
+                  size="small"
+                  dataSource={pendingMemorySyncKeys.slice(0, 20)}
+                  renderItem={key => <List.Item><Text code>{key}</Text></List.Item>}
+                />
+                {pendingMemorySyncKeys.length > 20 && (
+                  <Text type="secondary">还有 {pendingMemorySyncKeys.length - 20} 条未展示。</Text>
+                )}
+              </Modal>
+            </Space>
+          </Card>
+          <Card size="small" title="对话归档到知识库">
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Paragraph type="secondary" style={{ margin: 0 }}>
+                新对话会自动双写到本地 JSON 和 Obsidian Markdown；也可以手动把历史会话补归档到 Codex/对话存档。
+              </Paragraph>
+              <Space wrap>
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={archivingConversations}
+                  onClick={archiveConversationsToObsidian}
+                >
+                  归档全部历史对话
+                </Button>
+                {conversationArchiveResult?.index?.relativePath && (
+                  <Tag color="green">{conversationArchiveResult.index.relativePath}</Tag>
+                )}
+              </Space>
+              {conversationArchiveResult && (
+                <Space wrap>
+                  <Tag color="blue">已归档 {conversationArchiveResult.archived?.length || 0}</Tag>
+                  <Tag color="default">跳过 {conversationArchiveResult.skipped?.length || 0}</Tag>
+                  <Tag color={(conversationArchiveResult.failed?.length || 0) > 0 ? 'red' : 'green'}>
+                    失败 {conversationArchiveResult.failed?.length || 0}
+                  </Tag>
+                </Space>
+              )}
+            </Space>
+          </Card>
         </Space>
       </Card>
       <Card size="small" style={{ marginBottom: 16 }}>
@@ -593,7 +862,7 @@ const Settings: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <RobotOutlined style={{ fontSize: 48, color: '#1890ff' }} />
             <div>
-              <Title level={3} style={{ margin: 0 }}>Lingshu</Title>
+              <Title level={3} style={{ margin: 0 }}>灵枢</Title>
               <Tag color="blue">v1.0.0</Tag>
             </div>
           </div>

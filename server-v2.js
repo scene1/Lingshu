@@ -2,10 +2,12 @@ import express from 'express'
 import cors from 'cors'
 import fs from 'fs'
 import path from 'path'
-import { exec, spawn, execFileSync } from 'child_process'
+import { exec, spawn, execFile, execFileSync } from 'child_process'
 import os from 'os'
 import multer from 'multer'
 import { fileURLToPath } from 'url'
+import crypto from 'crypto'
+import MarkdownIt from 'markdown-it'
 
 // 放宽 SSL 证书校验（自签证书 / 内部 API 网关需要）
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
@@ -17,12 +19,31 @@ app.use(cors())
 app.use(express.json())
 
 // 数据存储目录
-const DATA_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'openclaw-web-ui-data')
+const LEGACY_OPENCLAW_DATA_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'openclaw-web-ui-data')
+const DEFAULT_LINGSHU_DATA_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'lingshu-app-data')
+const DATA_DIR = process.env.LINGSHU_DATA_DIR || process.env.OPENCLAW_DATA_DIR || (fs.existsSync(LEGACY_OPENCLAW_DATA_DIR) ? LEGACY_OPENCLAW_DATA_DIR : DEFAULT_LINGSHU_DATA_DIR)
 const INSTANCES_FILE = path.join(DATA_DIR, 'instances.json')
 const CHAT_DIR = path.join(DATA_DIR, 'chat-history')
-const UPLOAD_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'uploads')
+const UPLOAD_DIR = process.env.LINGSHU_UPLOAD_DIR || process.env.OPENCLAW_UPLOAD_DIR || path.join(os.homedir(), '.stepclaw', 'workspace', 'uploads')
 const USER_SKILLS_DIR = path.join(os.homedir(), '.stepclaw', 'skills')
+const DOCUMENT_VERSION_DIR = path.join(DATA_DIR, 'document-versions')
+const MEETINGS_DIR = path.join(DATA_DIR, 'meetings')
+const EXPORTS_DIR = path.join(DATA_DIR, 'exports')
+const DOCUMENT_WORKBENCH_FILE = path.join(DATA_DIR, 'document-workbench.json')
+const TOOL_RUNTIME_AUDIT_FILE = path.join(DATA_DIR, 'tool-runtime-audit.jsonl')
+const AGENT_DESKTOP_INVOCATIONS_FILE = path.join(DATA_DIR, 'agent-desktop-invocations.jsonl')
+const GROUP_CHAT_DIR = path.join(CHAT_DIR, 'group-chat')
 const upload = multer({ dest: UPLOAD_DIR })
+const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: true })
+const documentWatchState = {
+  key: '',
+  watcher: null,
+  events: [],
+  timers: new Map(),
+  fileWatches: new Map(),
+  lastId: 0,
+  error: ''
+}
 
 // 确保目录存在
 if (!fs.existsSync(DATA_DIR)) {
@@ -37,50 +58,340 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 if (!fs.existsSync(USER_SKILLS_DIR)) {
   fs.mkdirSync(USER_SKILLS_DIR, { recursive: true })
 }
+if (!fs.existsSync(DOCUMENT_VERSION_DIR)) {
+  fs.mkdirSync(DOCUMENT_VERSION_DIR, { recursive: true })
+}
+if (!fs.existsSync(MEETINGS_DIR)) {
+  fs.mkdirSync(MEETINGS_DIR, { recursive: true })
+}
+if (!fs.existsSync(EXPORTS_DIR)) {
+  fs.mkdirSync(EXPORTS_DIR, { recursive: true })
+}
+if (!fs.existsSync(DOCUMENT_WORKBENCH_FILE)) {
+  fs.writeFileSync(DOCUMENT_WORKBENCH_FILE, JSON.stringify({ recent: [], favorites: [] }, null, 2))
+}
+if (!fs.existsSync(TOOL_RUNTIME_AUDIT_FILE)) {
+  fs.writeFileSync(TOOL_RUNTIME_AUDIT_FILE, '')
+}
+if (!fs.existsSync(AGENT_DESKTOP_INVOCATIONS_FILE)) {
+  fs.writeFileSync(AGENT_DESKTOP_INVOCATIONS_FILE, '')
+}
+if (!fs.existsSync(GROUP_CHAT_DIR)) {
+  fs.mkdirSync(GROUP_CHAT_DIR, { recursive: true })
+}
 
 app.use('/uploads', express.static(UPLOAD_DIR))
+app.use('/exports', express.static(EXPORTS_DIR, {
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+  }
+}))
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    name: 'lingshu-app',
+    port: PORT,
+    time: new Date().toISOString()
+  })
+})
 
 // 默认实例配置
 const DEFAULT_INSTANCES = [
   {
     id: 'local',
-    name: '本地 OpenClaw',
+    name: '本地灵枢运行时',
     type: 'local',
     status: 'connected',
     configPath: '~/.stepclaw/openclaw.json',
     workspacePath: '~/.stepclaw/workspace',
-    description: '当前机器上的 OpenClaw 实例',
+    description: '当前机器上的灵枢运行实例',
     lastConnected: new Date().toISOString()
   },
   {
-    id: 'stepfun-desktop',
-    name: '小跃你 (阶跃桌面端)',
-    type: 'stepfun-desktop',
-    status: 'connected',
-    configPath: '~/.stepclaw/openclaw.json',
+    id: 'workbuddy-desktop',
+    name: 'WorkBuddy',
+    type: 'agent-desktop',
+    status: 'disconnected',
+    appName: 'WorkBuddy',
+    configPath: '/Applications/WorkBuddy.app',
     workspacePath: '~/.stepclaw/workspace',
-    description: '阶跃 AI 桌面端托管的 OpenClaw',
-    lastConnected: new Date().toISOString()
+    description: '本机 WorkBuddy Agent 桌面端',
+    lastConnected: ''
+  },
+  {
+    id: 'marvis-desktop',
+    name: 'Marvis',
+    type: 'agent-desktop',
+    status: 'disconnected',
+    appName: 'Marvis',
+    configPath: '/Applications/Marvis.app',
+    workspacePath: '~/.stepclaw/workspace',
+    description: '本机 Marvis Agent 桌面端',
+    lastConnected: ''
+  },
+  {
+    id: 'codex-desktop',
+    name: 'Codex',
+    type: 'agent-desktop',
+    status: 'disconnected',
+    appName: 'Codex',
+    configPath: '/Applications/Codex.app',
+    workspacePath: '~/.stepclaw/workspace',
+    description: '本机 Codex Agent 桌面端',
+    lastConnected: ''
   }
 ]
+
+function findInstalledMacAppPath(candidate) {
+  const clean = String(candidate || '').trim().replace(/\.app$/i, '')
+  if (!clean) return ''
+  const appFileName = `${clean}.app`.toLowerCase()
+  const roots = ['/Applications', path.join(os.homedir(), 'Applications')]
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root)) continue
+      const entries = fs.readdirSync(root, { withFileTypes: true })
+      const match = entries.find(entry => entry.isDirectory() && entry.name.toLowerCase() === appFileName)
+      if (match) return path.join(root, match.name)
+    } catch (_) {}
+  }
+  return ''
+}
+
+function safeInstanceSlug(value) {
+  return String(value || 'agent')
+    .trim()
+    .toLowerCase()
+    .replace(/\.app$/i, '')
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'agent'
+}
+
+function parseUrlSchemes(info) {
+  try {
+    const rows = Array.isArray(info.CFBundleURLTypes) ? info.CFBundleURLTypes : []
+    return rows.flatMap(row => Array.isArray(row.CFBundleURLSchemes) ? row.CFBundleURLSchemes : [])
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+  } catch (_) {
+    return []
+  }
+}
+
+function findExecutableOnPath(commandName) {
+  const clean = String(commandName || '').trim()
+  if (!clean || clean.includes('/') || /[\u0000\r\n]/.test(clean)) return ''
+  const pathEntries = String(process.env.PATH || '')
+    .split(path.delimiter)
+    .filter(Boolean)
+  const extraEntries = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']
+  for (const dir of [...pathEntries, ...extraEntries]) {
+    try {
+      const candidate = path.join(dir, clean)
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate
+    } catch (_) {}
+  }
+  return ''
+}
+
+function detectAgentInvocationCapabilities(appInfo) {
+  const displayName = String(appInfo.displayName || appInfo.name || '').toLowerCase()
+  const bundleId = String(appInfo.bundleId || '').toLowerCase()
+  const cliCandidateMap = [
+    { match: /codex|openai/, commands: ['codex'] },
+    { match: /workbuddy/, commands: ['workbuddy'] },
+    { match: /marvis/, commands: ['marvis'] },
+    { match: /cursor/, commands: ['cursor'] },
+    { match: /claude/, commands: ['claude'] },
+    { match: /chatgpt/, commands: ['chatgpt'] },
+    { match: /parazta/, commands: ['parazta'] }
+  ]
+  const matched = cliCandidateMap.find(item => item.match.test(displayName) || item.match.test(bundleId))
+  const cliCommand = matched?.commands.map(findExecutableOnPath).find(Boolean) || ''
+  const urlScheme = (appInfo.urlSchemes || []).find(scheme =>
+    !['http', 'https', 'file', 'mailto'].includes(String(scheme).toLowerCase())
+  ) || ''
+  return {
+    canOpen: true,
+    canUseUrlScheme: !!urlScheme,
+    canUseCli: !!cliCommand,
+    urlScheme,
+    cliCommand,
+    suggestedInvocationMode: cliCommand ? 'cli' : urlScheme ? 'url-scheme' : 'open',
+    note: cliCommand
+      ? `检测到 CLI：${cliCommand}`
+      : urlScheme
+        ? `检测到 URL Scheme：${urlScheme}://`
+        : '未检测到可投递接口，默认打开桌面端并记录调用意图'
+  }
+}
+
+function readMacAppInfo(appPath) {
+  const fallbackName = path.basename(appPath, '.app')
+  const infoPath = path.join(appPath, 'Contents', 'Info.plist')
+  if (!fs.existsSync(infoPath)) {
+    return { name: fallbackName, displayName: fallbackName, bundleId: '', version: '', path: appPath }
+  }
+  try {
+    const raw = execFileSync('plutil', ['-convert', 'json', '-o', '-', infoPath], {
+      encoding: 'utf8',
+      timeout: 5000
+    })
+    const info = JSON.parse(raw)
+    const displayName = info.CFBundleDisplayName || info.CFBundleName || info.CFBundleExecutable || fallbackName
+    return {
+      name: String(info.CFBundleName || displayName || fallbackName),
+      displayName: String(displayName || fallbackName),
+      bundleId: String(info.CFBundleIdentifier || ''),
+      version: String(info.CFBundleShortVersionString || info.CFBundleVersion || ''),
+      executable: String(info.CFBundleExecutable || ''),
+      urlSchemes: parseUrlSchemes(info),
+      path: appPath
+    }
+  } catch (_) {
+    return { name: fallbackName, displayName: fallbackName, bundleId: '', version: '', urlSchemes: [], path: appPath }
+  }
+}
+
+function scanLocalAgentApps() {
+  const roots = ['/Applications', path.join(os.homedir(), 'Applications')]
+  const knownNames = new Set([
+    'workbuddy',
+    'marvis',
+    'codex',
+    'chatgpt',
+    'claude',
+    'cursor',
+    'raycast',
+    'parazta',
+    'orcha writer',
+    'orcha',
+    'obsidian',
+    'trae',
+    'windsurf'
+  ])
+  const keywordPattern = /(agent|ai|gpt|claude|codex|buddy|marvis|cursor|parazta|orcha|trae|windsurf|assistant|copilot)/i
+  const seen = new Set()
+  const apps = []
+
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root)) continue
+      const entries = fs.readdirSync(root, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory() || !entry.name.endsWith('.app')) continue
+        const appPath = path.join(root, entry.name)
+        const info = readMacAppInfo(appPath)
+        const haystack = `${entry.name} ${info.name} ${info.displayName} ${info.bundleId} ${info.executable || ''}`
+        const normalizedName = String(info.displayName || info.name || entry.name).replace(/\.app$/i, '').toLowerCase()
+        const known = knownNames.has(normalizedName) || knownNames.has(entry.name.replace(/\.app$/i, '').toLowerCase())
+        const keyword = keywordPattern.test(haystack)
+        if (!known && !keyword) continue
+        const key = info.bundleId || appPath
+        if (seen.has(key)) continue
+        seen.add(key)
+        const baseInfo = {
+          name: info.name,
+          displayName: info.displayName,
+          bundleId: info.bundleId,
+          version: info.version,
+          executable: info.executable || '',
+          urlSchemes: info.urlSchemes || [],
+          path: appPath,
+          source: root === '/Applications' ? 'applications' : 'home-applications',
+          matchedReason: known ? 'known-agent-app' : 'keyword-match',
+          installed: true
+        }
+        apps.push({
+          ...baseInfo,
+          invocation: detectAgentInvocationCapabilities(baseInfo)
+        })
+      }
+    } catch (_) {}
+  }
+
+  return apps.sort((a, b) => String(a.displayName).localeCompare(String(b.displayName), 'zh-CN'))
+}
+
+function renderInvocationTemplate(template, instruction, context = {}) {
+  return String(template || '')
+    .replace(/\{\{instruction\}\}/g, instruction)
+    .replace(/\{\{encodedInstruction\}\}/g, encodeURIComponent(instruction))
+    .replace(/\{\{appName\}\}/g, context.appName || '')
+    .replace(/\{\{instanceId\}\}/g, context.instanceId || '')
+}
+
+function parseCliArgsTemplate(template, instruction, context = {}) {
+  const raw = String(template || '{{instruction}}')
+  const lines = raw.includes('\n') ? raw.split('\n') : raw.split(/\s+/)
+  return lines
+    .map(line => renderInvocationTemplate(line, instruction, context).trim())
+    .filter(Boolean)
+}
+
+function normalizeInvocationMode(instance) {
+  const mode = String(instance?.invocationMode || '').trim()
+  if (['cli', 'url-scheme', 'open'].includes(mode)) return mode
+  if (instance?.cliCommand) return 'cli'
+  if (instance?.urlTemplate || instance?.urlScheme) return 'url-scheme'
+  return 'open'
+}
+
+function normalizeInstance(instance) {
+  if (!instance || typeof instance !== 'object') return instance
+  const next = { ...instance }
+  if (next.type === 'stepfun-desktop') {
+    next.type = 'agent-desktop'
+    next.name = String(next.name || '').includes('阶跃') || String(next.name || '').includes('小跃')
+      ? 'Agent 桌面端'
+      : next.name
+    next.description = String(next.description || '').replace(/阶跃 AI 桌面端托管的/, '本机 Agent 桌面端连接的')
+    next.appName = next.appName || 'Agent Desktop'
+  }
+  return next
+}
+
+function seedAgentDesktopDefaults(existingInstances) {
+  const next = Array.isArray(existingInstances) ? [...existingInstances] : []
+  const existingIds = new Set(next.map(instance => instance?.id))
+  for (const preset of DEFAULT_INSTANCES.filter(instance => instance.type === 'agent-desktop')) {
+    if (!existingIds.has(preset.id)) next.push({ ...preset })
+  }
+  return next
+}
 
 // 加载实例列表
 function loadInstances() {
   try {
     if (fs.existsSync(INSTANCES_FILE)) {
       const data = JSON.parse(fs.readFileSync(INSTANCES_FILE, 'utf8'))
-      return data.instances || DEFAULT_INSTANCES
+      let loaded = (data.instances || DEFAULT_INSTANCES).map(normalizeInstance)
+      if (data.agentDesktopDefaultsSeeded !== true) {
+        loaded = seedAgentDesktopDefaults(loaded)
+        fs.writeFileSync(INSTANCES_FILE, JSON.stringify({
+          instances: loaded,
+          updatedAt: new Date().toISOString(),
+          agentDesktopDefaultsSeeded: true
+        }, null, 2))
+      }
+      return loaded
     }
   } catch (error) {
     console.error('加载实例失败:', error)
   }
-  return DEFAULT_INSTANCES
+  return DEFAULT_INSTANCES.map(normalizeInstance)
 }
 
 // 保存实例列表
 function saveInstances(instances) {
   try {
-    fs.writeFileSync(INSTANCES_FILE, JSON.stringify({ instances, updatedAt: new Date().toISOString() }, null, 2))
+    fs.writeFileSync(INSTANCES_FILE, JSON.stringify({
+      instances,
+      updatedAt: new Date().toISOString(),
+      agentDesktopDefaultsSeeded: true
+    }, null, 2))
   } catch (error) {
     console.error('保存实例失败:', error)
   }
@@ -212,7 +523,7 @@ function buildSystemPrompt() {
     `- **${s.name}**${s.description ? ': ' + s.description : ''}`
   ).join('\n')
 
-  return `你是 OpenClaw AI 助手，当前挂载了以下 Skills（技能）。当用户询问你的能力或技能时，必须严格列出这些实际挂载的 Skills，不要编造不存在的能力。
+  return `你是灵枢 AI 助手，当前挂载了以下 Skills（技能）。当用户询问你的能力或技能时，必须严格列出这些实际挂载的 Skills，不要编造不存在的能力。
 
 ## 已挂载的 Skills
 
@@ -231,9 +542,18 @@ const DEFAULT_OBSIDIAN_SETTINGS = {
   enabled: false,
   vaultPath: '',
   includeFolders: [''],
-  excludeFolders: ['.obsidian', '.git', 'node_modules', '.trash'],
+  excludeFolders: ['.obsidian', '.git', 'node_modules', '.trash', '.lingshu'],
   maxResults: 5,
   writeMemoryEnabled: true
+}
+
+const DEFAULT_TRANSCRIPTION_SETTINGS = {
+  enabled: false,
+  provider: 'browser',
+  baseUrl: '',
+  apiKey: '',
+  model: 'whisper-1',
+  language: 'zh'
 }
 
 const DEFAULT_SETTINGS = {
@@ -241,6 +561,7 @@ const DEFAULT_SETTINGS = {
   models: { defaultModel: '', defaultProvider: '' },
   data: { cacheSize: 0 },
   obsidian: DEFAULT_OBSIDIAN_SETTINGS,
+  transcription: DEFAULT_TRANSCRIPTION_SETTINGS,
   version: '1.0.0'
 }
 
@@ -257,7 +578,8 @@ function loadSettings() {
         general: { ...DEFAULT_SETTINGS.general, ...(settings.general || {}) },
         models: { ...DEFAULT_SETTINGS.models, ...(settings.models || {}) },
         data: { ...DEFAULT_SETTINGS.data, ...(settings.data || {}) },
-        obsidian: { ...DEFAULT_OBSIDIAN_SETTINGS, ...(settings.obsidian || {}) }
+        obsidian: { ...DEFAULT_OBSIDIAN_SETTINGS, ...(settings.obsidian || {}) },
+        transcription: { ...DEFAULT_TRANSCRIPTION_SETTINGS, ...(settings.transcription || {}) }
       }
     }
   } catch (_) {}
@@ -299,11 +621,15 @@ function getObsidianConfig() {
   const settings = loadSettings()
   const raw = { ...DEFAULT_OBSIDIAN_SETTINGS, ...(settings.obsidian || {}) }
   const vaultPath = raw.vaultPath ? path.resolve(expandHome(raw.vaultPath)) : ''
+  const excludeFolders = [
+    ...DEFAULT_OBSIDIAN_SETTINGS.excludeFolders,
+    ...normalizeFolderList(raw.excludeFolders, DEFAULT_OBSIDIAN_SETTINGS.excludeFolders)
+  ]
   return {
     ...raw,
     vaultPath,
     includeFolders: normalizeFolderList(raw.includeFolders, DEFAULT_OBSIDIAN_SETTINGS.includeFolders),
-    excludeFolders: normalizeFolderList(raw.excludeFolders, DEFAULT_OBSIDIAN_SETTINGS.excludeFolders),
+    excludeFolders: [...new Set(excludeFolders)],
     maxResults: Math.min(Math.max(Number(raw.maxResults) || 5, 1), 12),
     writeMemoryEnabled: raw.writeMemoryEnabled !== false
   }
@@ -372,7 +698,7 @@ function stripMarkdownForSearch(content) {
 
 function tokenizeSearchText(text) {
   const lower = String(text || '').toLowerCase()
-  const latinTokens = lower.match(/[a-z0-9_#+.-]{2,}/g) || []
+  const latinTokens = lower.match(/[a-z0-9_#+.]{2,}/g) || []
   const cjkSegments = lower.match(/[\u4e00-\u9fff]{2,}/g) || []
   const cjkTokens = []
   for (const segment of cjkSegments) {
@@ -382,16 +708,78 @@ function tokenizeSearchText(text) {
   return [...new Set([...latinTokens, ...cjkTokens])].slice(0, 32)
 }
 
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function stripYamlQuotes(value) {
+  return String(value || '').trim().replace(/^['"]|['"]$/g, '')
+}
+
+function parseYamlValue(value) {
+  const clean = String(value || '').trim()
+  if (clean.startsWith('[') && clean.endsWith(']')) {
+    return clean.slice(1, -1).split(',').map(item => stripYamlQuotes(item)).filter(Boolean)
+  }
+  return stripYamlQuotes(clean)
+}
+
+function parseMarkdownFrontMatter(raw) {
+  const empty = { tags: [], status: '', created: '', updated: '', extra: {}, hasFrontMatter: false }
+  if (!String(raw || '').startsWith('---\n')) return empty
+  const lines = String(raw || '').split('\n')
+  const endIndex = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
+  if (endIndex <= 0) return empty
+  const frontMatter = { ...empty, hasFrontMatter: true, extra: {} }
+  const yamlLines = lines.slice(1, endIndex)
+  for (let index = 0; index < yamlLines.length; index++) {
+    const line = yamlLines[index]
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
+    if (!match) continue
+    const key = match[1]
+    const lowerKey = key.toLowerCase()
+    let parsed = parseYamlValue(match[2])
+    if (match[2].trim() === '') {
+      const values = []
+      let cursor = index + 1
+      while (cursor < yamlLines.length) {
+        const child = yamlLines[cursor].match(/^\s*-\s+(.+)$/)
+        if (!child) break
+        values.push(stripYamlQuotes(child[1]))
+        cursor++
+      }
+      if (values.length > 0) {
+        parsed = values
+        index = cursor - 1
+      }
+    }
+    if (lowerKey === 'tags') {
+      frontMatter.tags = Array.isArray(parsed) ? parsed : String(parsed || '').split(/[,\s]+/).filter(Boolean)
+    } else if (lowerKey === 'status') {
+      frontMatter.status = Array.isArray(parsed) ? parsed.join(', ') : String(parsed || '')
+    } else if (lowerKey === 'created') {
+      frontMatter.created = Array.isArray(parsed) ? parsed[0] || '' : String(parsed || '')
+    } else if (lowerKey === 'updated') {
+      frontMatter.updated = Array.isArray(parsed) ? parsed[0] || '' : String(parsed || '')
+    } else {
+      frontMatter.extra[key] = parsed
+    }
+  }
+  return frontMatter
+}
+
 function readObsidianNote(filePath, config) {
   const stat = fs.statSync(filePath)
   if (stat.size > 512 * 1024) return null
   const raw = fs.readFileSync(filePath, 'utf8')
   const relativePath = path.relative(config.vaultPath, filePath).split(path.sep).join('/')
   const title = (raw.match(/^#\s+(.+)$/m)?.[1] || path.basename(filePath, '.md')).trim()
-  const tags = [...raw.matchAll(/(?:^|\s)#([\u4e00-\u9fff\w/-]+)/g)].map(match => match[1])
+  const frontMatter = parseMarkdownFrontMatter(raw)
+  const inlineTags = [...raw.matchAll(/(?:^|\s)#([\u4e00-\u9fff\w/-]+)/g)].map(match => match[1])
+  const tags = [...new Set([...frontMatter.tags, ...inlineTags])]
   const headings = [...raw.matchAll(/^#{1,4}\s+(.+)$/gm)].map(match => match[1].trim()).slice(0, 12)
   const plain = stripMarkdownForSearch(raw)
-  return { filePath, relativePath, title, tags, headings, raw, plain, mtime: stat.mtime.toISOString() }
+  return { filePath, relativePath, title, tags, frontMatter, headings, raw, plain, mtime: stat.mtime.toISOString() }
 }
 
 function scoreObsidianNote(note, query, tokens) {
@@ -506,7 +894,7 @@ function writeObsidianMemoryNote({ title, content, tags = [] }) {
   if (!validation.ok) throw new Error(validation.reason)
   if (!config.writeMemoryEnabled) throw new Error('未启用写入 Obsidian 记忆')
 
-  const memoryDir = path.join(config.vaultPath, 'OpenClaw', 'Memory', 'Facts')
+  const memoryDir = path.join(config.vaultPath, '灵枢', 'Memory', 'Facts')
   fs.mkdirSync(memoryDir, { recursive: true })
   if (!isPathInside(config.vaultPath, memoryDir)) throw new Error('非法写入路径')
 
@@ -523,20 +911,1183 @@ function writeObsidianMemoryNote({ title, content, tags = [] }) {
   const tagList = Array.isArray(tags) ? tags.map(tag => String(tag).replace(/^#/, '').trim()).filter(Boolean) : []
   const frontmatter = [
     '---',
-    `id: openclaw-${Date.now()}`,
+    `id: lingshu-${Date.now()}`,
     'type: memory',
-    'source: openclaw',
+    'source: lingshu',
     `created_at: ${now.toISOString()}`,
     `updated_at: ${now.toISOString()}`,
-    `tags: [${['openclaw-memory', ...tagList].map(tag => `"${tag}"`).join(', ')}]`,
+    `tags: [${['lingshu-memory', ...tagList].map(tag => `"${tag}"`).join(', ')}]`,
     '---'
   ].join('\n')
 
-  fs.writeFileSync(filePath, `${frontmatter}\n\n# ${safeTitle}\n\n${String(content || '').trim()}\n`)
+  atomicWriteTextFile(filePath, `${frontmatter}\n\n# ${safeTitle}\n\n${String(content || '').trim()}\n`)
   return {
     title: safeTitle,
     path: filePath,
     relativePath: path.relative(config.vaultPath, filePath).split(path.sep).join('/')
+  }
+}
+
+function formatMemoryValueForMarkdown(value) {
+  if (typeof value === 'string') return value
+  try { return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\`` }
+  catch (_) { return String(value || '') }
+}
+
+function buildMemorySyncContent(key, entry) {
+  const timestamp = entry?.timestamp || ''
+  const syncedAt = new Date().toISOString()
+  const metaLines = [
+    '> 来源：灵枢记忆',
+    entry?.agent ? `> Agent：${entry.agent}` : null,
+    timestamp ? `> 原记录时间：${timestamp}` : null,
+    `> 同步时间：${syncedAt}`
+  ].filter(Boolean)
+  return [
+    ...metaLines,
+    '',
+    '## Memory Key',
+    '',
+    `\`${key}\``,
+    '',
+    '## 内容',
+    '',
+    formatMemoryValueForMarkdown(entry?.value)
+  ].join('\n')
+}
+
+function syncMemoriesToObsidian({ keys = [], includeSynced = false } = {}) {
+  const data = loadMemory()
+  data.memories = data.memories || {}
+  const selectedKeys = (Array.isArray(keys) && keys.length > 0 ? keys : Object.keys(data.memories))
+    .map(key => String(key || '').trim())
+    .filter(Boolean)
+  const synced = []
+  const skipped = []
+
+  for (const key of selectedKeys) {
+    const entry = data.memories[key]
+    if (!entry) {
+      skipped.push({ key, reason: '记忆不存在' })
+      continue
+    }
+    if (!includeSynced && entry.syncedToObsidian?.relativePath) {
+      skipped.push({ key, reason: '已同步' })
+      continue
+    }
+    const note = writeObsidianMemoryNote({
+      title: key,
+      content: buildMemorySyncContent(key, entry),
+      tags: ['manual-sync', entry.agent || 'memory'].filter(Boolean)
+    })
+    data.memories[key] = {
+      ...entry,
+      syncedToObsidian: {
+        relativePath: note.relativePath,
+        syncedAt: new Date().toISOString()
+      }
+    }
+    synced.push({ key, note })
+  }
+
+  saveMemory(data)
+  return { success: true, synced, skipped, memories: data.memories }
+}
+
+// ==================== 文档工作台与会议纪要共享能力 ====================
+
+function getMarkdownVaultConfig() {
+  const config = getObsidianConfig()
+  const vaultPath = config.vaultPath ? path.resolve(config.vaultPath) : ''
+  if (!vaultPath) return { ok: false, reason: '未配置 Markdown Vault 路径', config }
+  if (!fs.existsSync(vaultPath)) return { ok: false, reason: 'Markdown Vault 路径不存在', config }
+  if (!fs.statSync(vaultPath).isDirectory()) return { ok: false, reason: 'Markdown Vault 路径不是目录', config }
+  return { ok: true, config: { ...config, vaultPath } }
+}
+
+function ensureLingshuVaultContract(config) {
+  const metaDir = path.join(config.vaultPath, '.lingshu')
+  if (!isPathInside(config.vaultPath, metaDir)) throw new Error('非法 .lingshu 路径')
+  const subdirs = ['history', 'tasks', 'attachments']
+  fs.mkdirSync(metaDir, { recursive: true })
+  for (const subdir of subdirs) {
+    const target = path.join(metaDir, subdir)
+    if (!isPathInside(config.vaultPath, target)) throw new Error('非法 .lingshu 子目录')
+    fs.mkdirSync(target, { recursive: true })
+  }
+  const readmePath = path.join(metaDir, 'README.md')
+  if (!fs.existsSync(readmePath)) {
+    atomicWriteTextFile(readmePath, [
+      '# .lingshu',
+      '',
+      '这是灵枢在当前 Markdown Vault 中使用的轻量运行时目录。',
+      '',
+      '- `history/`：预留给文档快照或可重建历史。',
+      '- `tasks/`：预留给 AI 写入待确认任务。',
+      '- `attachments/`：预留给文档工作台附件。',
+      '',
+      '该目录会被灵枢和 Obsidian 检索默认排除；Markdown 正文仍然是唯一可信数据源。'
+    ].join('\n'))
+  }
+  return {
+    relativePath: '.lingshu',
+    history: '.lingshu/history',
+    tasks: '.lingshu/tasks',
+    attachments: '.lingshu/attachments'
+  }
+}
+
+function normalizeVaultRelativePath(inputPath, { allowEmpty = false } = {}) {
+  const raw = String(inputPath || '').replace(/\\/g, '/').trim()
+  if (!raw) {
+    if (allowEmpty) return ''
+    throw new Error('缺少文件路径')
+  }
+  if (path.isAbsolute(raw) || raw.startsWith('~')) throw new Error('仅允许 Vault 内相对路径')
+  const normalized = path.posix.normalize(raw).replace(/^\/+/, '')
+  if (!allowEmpty && (!normalized || normalized === '.')) throw new Error('缺少文件路径')
+  if (normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) throw new Error('非法路径')
+  return normalized === '.' ? '' : normalized
+}
+
+function resolveVaultPath(relativePath, config, { requireMarkdown = false, allowDirectory = false } = {}) {
+  const normalized = normalizeVaultRelativePath(relativePath, { allowEmpty: allowDirectory })
+  if (requireMarkdown && !normalized.toLowerCase().endsWith('.md')) throw new Error('仅支持 Markdown 文件')
+  const absolutePath = path.resolve(config.vaultPath, normalized)
+  if (!isPathInside(config.vaultPath, absolutePath)) throw new Error('路径超出 Vault 范围')
+  return { relativePath: normalized, absolutePath }
+}
+
+function hashContent(content) {
+  return crypto.createHash('sha256').update(String(content || '')).digest('hex')
+}
+
+function fileRevision(filePath) {
+  if (!fs.existsSync(filePath)) return ''
+  return hashContent(fs.readFileSync(filePath, 'utf8'))
+}
+
+function atomicWriteTextFile(filePath, content) {
+  const dir = path.dirname(filePath)
+  fs.mkdirSync(dir, { recursive: true })
+  const tempPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`)
+  let fd = null
+  try {
+    fd = fs.openSync(tempPath, 'w', 0o600)
+    fs.writeFileSync(fd, String(content || ''), 'utf8')
+    fs.fsyncSync(fd)
+    fs.closeSync(fd)
+    fd = null
+    fs.renameSync(tempPath, filePath)
+  } catch (error) {
+    if (fd !== null) {
+      try { fs.closeSync(fd) } catch (_) {}
+    }
+    try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath) } catch (_) {}
+    throw error
+  }
+}
+
+function documentSnapshotDirectory(relativePath) {
+  const safeRelative = relativePath.split('/').map(part => part.replace(/[\\/:*?"<>|]+/g, '_')).join('/')
+  return path.join(DOCUMENT_VERSION_DIR, safeRelative)
+}
+
+function documentSnapshotPath(relativePath) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  return path.join(documentSnapshotDirectory(relativePath), `${stamp}.md`)
+}
+
+function resolveDocumentSnapshot(relativePath, versionId) {
+  const safeVersion = path.basename(String(versionId || ''))
+  if (!/^\d{4}-\d{2}-\d{2}T[\d-]+Z\.md$/.test(safeVersion)) throw new Error('非法版本 ID')
+  const snapshotPath = path.join(documentSnapshotDirectory(relativePath), safeVersion)
+  if (!isPathInside(DOCUMENT_VERSION_DIR, snapshotPath)) throw new Error('非法版本路径')
+  return snapshotPath
+}
+
+function safeDocumentTitle(title) {
+  const clean = String(title || '未命名文档')
+    .replace(/[\\/:*?"<>|#^[\]]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
+  return clean || '未命名文档'
+}
+
+function safeConversationTitle(title) {
+  return safeDocumentTitle(String(title || '新会话').replace(/\.\.\.$/, '')).slice(0, 60) || '新会话'
+}
+
+function conversationRoleLabel(role) {
+  if (role === 'user') return '👤 用户'
+  if (role === 'assistant') return '🤖 AI'
+  if (role === 'system') return '⚙️ System'
+  return String(role || 'message')
+}
+
+function formatConversationMarkdown(sessionData, instance = null) {
+  const title = safeConversationTitle(sessionData.title || sessionData.messages?.[0]?.content || '新会话')
+  const createdAt = sessionData.createdAt || new Date().toISOString()
+  const updatedAt = sessionData.updatedAt || createdAt
+  const messages = Array.isArray(sessionData.messages) ? sessionData.messages : []
+  const frontmatter = [
+    '---',
+    `id: ${sessionData.id || `session-${Date.now()}`}`,
+    'type: conversation',
+    'source: lingshu',
+    `instance_id: ${sessionData.instanceId || ''}`,
+    instance?.name ? `instance_name: ${JSON.stringify(instance.name)}` : '',
+    sessionData.model ? `model: ${JSON.stringify(sessionData.model)}` : '',
+    `created_at: ${createdAt}`,
+    `updated_at: ${updatedAt}`,
+    `message_count: ${messages.length}`,
+    'tags: ["codex", "conversation", "lingshu"]',
+    '---'
+  ].filter(Boolean).join('\n')
+
+  const header = [
+    frontmatter,
+    '',
+    `# ${title}`,
+    '',
+    `- **会话ID**: \`${sessionData.id || ''}\``,
+    `- **实例**: ${instance?.name || sessionData.instanceId || 'unknown'}`,
+    `- **日期**: ${String(createdAt).slice(0, 10)}`,
+    `- **消息数**: ${messages.length} 条`,
+    sessionData.obsidianArchive?.relativePath ? `- **归档路径**: \`${sessionData.obsidianArchive.relativePath}\`` : '',
+    '',
+    '---',
+    ''
+  ].filter(line => line !== '').join('\n')
+
+  const messageBlocks = messages.map((message, index) => [
+    `### ${conversationRoleLabel(message.role)} (${index + 1})`,
+    '',
+    message.model ? `> model: ${message.model}` : '',
+    message.timestamp ? `> time: ${message.timestamp}` : '',
+    '',
+    String(message.content || '').trim() || '_空消息_',
+    '',
+    '---',
+    ''
+  ].filter(line => line !== '').join('\n')).join('\n')
+
+  return `${header}\n${messageBlocks}`.trim() + '\n'
+}
+
+function resolveConversationArchivePath(sessionData, config) {
+  const archiveDir = path.join(config.vaultPath, 'Codex', '对话存档')
+  if (!isPathInside(config.vaultPath, archiveDir)) throw new Error('非法会话归档目录')
+  fs.mkdirSync(archiveDir, { recursive: true })
+
+  const existing = sessionData.obsidianArchive?.relativePath
+  if (existing) {
+    try {
+      const resolved = resolveVaultPath(existing, config, { requireMarkdown: true })
+      if (resolved.relativePath.startsWith('Codex/对话存档/')) return resolved.absolutePath
+    } catch (_) {}
+  }
+
+  const createdDate = String(sessionData.createdAt || new Date().toISOString()).slice(0, 10)
+  const title = safeConversationTitle(sessionData.title || sessionData.messages?.[0]?.content || '新会话')
+  const shortId = String(sessionData.id || Date.now()).replace(/[^\w-]+/g, '').slice(-8)
+  let filePath = path.join(archiveDir, `会话_${createdDate}_${title}.md`)
+  if (fs.existsSync(filePath)) filePath = path.join(archiveDir, `会话_${createdDate}_${title}_${shortId}.md`)
+  let suffix = 2
+  while (fs.existsSync(filePath)) {
+    filePath = path.join(archiveDir, `会话_${createdDate}_${title}_${shortId}-${suffix}.md`)
+    suffix++
+  }
+  return filePath
+}
+
+function collectArchivedConversationEntries(config) {
+  const archiveDir = path.join(config.vaultPath, 'Codex', '对话存档')
+  if (!fs.existsSync(archiveDir)) return []
+  return fs.readdirSync(archiveDir, { withFileTypes: true })
+    .filter(entry => entry.isFile() && entry.name.endsWith('.md') && entry.name !== '会话索引.md')
+    .map(entry => {
+      const relativePath = `Codex/对话存档/${entry.name}`
+      const title = entry.name.replace(/\.md$/, '')
+      const date = entry.name.match(/会话_(\d{4}-\d{2}-\d{2})/)?.[1] || ''
+      return { title, date, relativePath }
+    })
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)) || a.title.localeCompare(b.title, 'zh-Hans-CN'))
+}
+
+function updateConversationArchiveIndex(config) {
+  const archiveDir = path.join(config.vaultPath, 'Codex', '对话存档')
+  fs.mkdirSync(archiveDir, { recursive: true })
+  const entries = collectArchivedConversationEntries(config)
+  const lines = [
+    '# Codex 会话索引',
+    '',
+    `> 共 ${entries.length} 个历史会话，按时间倒序排列。由灵枢自动维护。`,
+    '',
+    '| 序号 | 日期 | 标题 |',
+    '|------|------|------|',
+    ...entries.map((entry, index) => {
+      const link = entry.relativePath.replace(/^Codex\/对话存档\//, '').replace(/\.md$/, '')
+      return `| ${index + 1} | ${entry.date || '-'} | [[${link}]] |`
+    })
+  ]
+  atomicWriteTextFile(path.join(archiveDir, '会话索引.md'), lines.join('\n') + '\n')
+  return { count: entries.length, relativePath: 'Codex/对话存档/会话索引.md' }
+}
+
+function archiveSessionToObsidian(sessionData, { updateIndex = true } = {}) {
+  const vault = getMarkdownVaultConfig()
+  if (!vault.ok) return { ok: false, skipped: true, reason: vault.reason }
+  if (!Array.isArray(sessionData.messages) || sessionData.messages.length === 0) {
+    return { ok: false, skipped: true, reason: '空会话暂不归档' }
+  }
+
+  const instance = instances.find(item => item.id === sessionData.instanceId)
+  const archivePath = resolveConversationArchivePath(sessionData, vault.config)
+  const relativePath = path.relative(vault.config.vaultPath, archivePath).split(path.sep).join('/')
+  const nextSessionData = {
+    ...sessionData,
+    obsidianArchive: {
+      relativePath,
+      archivedAt: new Date().toISOString()
+    }
+  }
+  atomicWriteTextFile(archivePath, formatConversationMarkdown(nextSessionData, instance))
+  const index = updateIndex ? updateConversationArchiveIndex(vault.config) : null
+  return { ok: true, relativePath, index, sessionData: nextSessionData }
+}
+
+function saveSessionJson(filePath, sessionData, { archive = false, updateIndex = true } = {}) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  let nextSessionData = sessionData
+  let archiveResult = null
+  if (archive) {
+    try {
+      archiveResult = archiveSessionToObsidian(sessionData, { updateIndex })
+      if (archiveResult.ok && archiveResult.sessionData) nextSessionData = archiveResult.sessionData
+    } catch (error) {
+      archiveResult = { ok: false, error: error.message }
+      nextSessionData = {
+        ...sessionData,
+        obsidianArchiveError: {
+          message: error.message,
+          at: new Date().toISOString()
+        }
+      }
+    }
+  }
+  fs.writeFileSync(filePath, JSON.stringify(nextSessionData, null, 2))
+  return { sessionData: nextSessionData, archiveResult }
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function buildExportHtml({ title, markdown, sourcePath }) {
+  const rendered = markdownRenderer.render(String(markdown || ''))
+  const generatedAt = new Date().toISOString()
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; background: #f6f8fb; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; line-height: 1.72; }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 28px 72px; background: #fff; min-height: 100vh; }
+    h1, h2, h3, h4 { line-height: 1.3; margin: 1.4em 0 0.55em; }
+    h1 { font-size: 2rem; padding-bottom: 0.35em; border-bottom: 1px solid #e5e7eb; }
+    h2 { font-size: 1.45rem; padding-bottom: 0.25em; border-bottom: 1px solid #eef2f6; }
+    p, ul, ol, blockquote, pre, table { margin: 0.75em 0; }
+    a { color: #2563eb; }
+    code { padding: 0.14em 0.34em; border-radius: 4px; background: #f2f4f7; font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 0.92em; }
+    pre { overflow: auto; padding: 14px 16px; border-radius: 8px; background: #111827; color: #f9fafb; }
+    pre code { padding: 0; background: transparent; color: inherit; }
+    blockquote { padding-left: 14px; color: #4b5563; border-left: 4px solid #93c5fd; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 10px; border: 1px solid #e5e7eb; text-align: left; vertical-align: top; }
+    th { background: #f9fafb; }
+    .export-meta { margin-bottom: 28px; color: #667085; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="export-meta">Source: ${escapeHtml(sourcePath)} · Generated: ${escapeHtml(generatedAt)}</div>
+    ${rendered}
+  </main>
+</body>
+</html>`
+}
+
+function buildExportFileName(relativePath, format) {
+  const parsed = path.parse(relativePath || 'document.md')
+  const safeBase = safeDocumentTitle(parsed.name || 'document')
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  return `${stamp}-${safeBase}.${format === 'html' ? 'html' : 'md'}`
+}
+
+function loadDocumentWorkbenchState() {
+  try {
+    const data = JSON.parse(fs.readFileSync(DOCUMENT_WORKBENCH_FILE, 'utf8'))
+    return {
+      recent: Array.isArray(data.recent) ? data.recent : [],
+      favorites: Array.isArray(data.favorites) ? data.favorites : []
+    }
+  } catch (_) {
+    return { recent: [], favorites: [] }
+  }
+}
+
+function saveDocumentWorkbenchState(state) {
+  fs.writeFileSync(DOCUMENT_WORKBENCH_FILE, JSON.stringify({
+    recent: Array.isArray(state.recent) ? state.recent.slice(0, 30) : [],
+    favorites: Array.isArray(state.favorites) ? state.favorites.slice(0, 80) : []
+  }, null, 2))
+}
+
+function normalizeDocumentWorkbenchEntry(input, config) {
+  const { relativePath, absolutePath } = resolveVaultPath(input?.path || input?.relativePath, config, { requireMarkdown: true })
+  const title = safeDocumentTitle(input?.title || path.basename(relativePath, '.md'))
+  const stat = fs.existsSync(absolutePath) ? fs.statSync(absolutePath) : null
+  return {
+    path: relativePath,
+    title,
+    mtime: stat?.mtime?.toISOString?.() || '',
+    updatedAt: new Date().toISOString()
+  }
+}
+
+function buildDocumentTree(config) {
+  const walk = (dir, depth = 0) => {
+    if (depth > 8) return []
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch (_) { return [] }
+
+    return entries
+      .filter(entry => {
+        const relativePath = path.relative(config.vaultPath, path.join(dir, entry.name)).split(path.sep).join('/')
+        if (!shouldIncludeObsidianPath(relativePath, config)) return false
+        return entry.isDirectory() || (entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
+      })
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name, 'zh-Hans-CN'))
+      .slice(0, 300)
+      .map(entry => {
+        const fullPath = path.join(dir, entry.name)
+        const relativePath = path.relative(config.vaultPath, fullPath).split(path.sep).join('/')
+        const node = {
+          title: entry.name,
+          key: relativePath,
+          path: relativePath,
+          type: entry.isDirectory() ? 'directory' : 'file'
+        }
+        if (entry.isDirectory()) node.children = walk(fullPath, depth + 1)
+        return node
+      })
+  }
+
+  return walk(config.vaultPath)
+}
+
+function listMarkdownVaultFiles(config, maxFiles = 3000) {
+  const results = []
+  const walk = (dir) => {
+    if (results.length >= maxFiles) return
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch (_) { return }
+    for (const entry of entries) {
+      if (results.length >= maxFiles) break
+      const fullPath = path.join(dir, entry.name)
+      const relativePath = path.relative(config.vaultPath, fullPath).split(path.sep).join('/')
+      if (!shouldIncludeObsidianPath(relativePath, config)) continue
+      if (entry.isDirectory()) {
+        walk(fullPath)
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+        results.push(fullPath)
+      }
+    }
+  }
+  walk(config.vaultPath)
+  return results
+}
+
+function searchMarkdownDocuments(query, maxResults = 20) {
+  const vault = getMarkdownVaultConfig()
+  if (!vault.ok) return { ok: false, reason: vault.reason, results: [] }
+  const tokens = tokenizeSearchText(query)
+  if (tokens.length === 0) return { ok: true, results: [] }
+
+  const results = []
+  for (const filePath of listMarkdownVaultFiles(vault.config)) {
+    try {
+      if (!isPathInside(vault.config.vaultPath, filePath)) continue
+      const note = readObsidianNote(filePath, vault.config)
+      if (!note) continue
+      const score = scoreObsidianNote(note, query, tokens)
+      if (score <= 0) continue
+      results.push({
+        title: note.title,
+        relativePath: note.relativePath,
+        path: note.relativePath,
+        tags: note.tags,
+        headings: note.headings.slice(0, 6),
+        mtime: note.mtime,
+        score,
+        snippet: buildObsidianSnippet(note, tokens, 260)
+      })
+    } catch (_) {}
+  }
+
+  results.sort((a, b) => b.score - a.score || new Date(b.mtime) - new Date(a.mtime))
+  return { ok: true, results: results.slice(0, Math.min(Math.max(Number(maxResults) || 20, 1), 50)) }
+}
+
+function listDocumentProperties(config, { tags = [], status = '', query = '', maxResults = 200 } = {}) {
+  const selectedTags = (Array.isArray(tags) ? tags : String(tags || '').split(','))
+    .map(tag => String(tag || '').trim().toLowerCase())
+    .filter(Boolean)
+  const selectedStatus = String(status || '').trim().toLowerCase()
+  const cleanQuery = String(query || '').trim().toLowerCase()
+  const tagFacet = new Map()
+  const statusFacet = new Map()
+  const documents = []
+
+  for (const filePath of listMarkdownVaultFiles(config, 5000)) {
+    try {
+      if (!isPathInside(config.vaultPath, filePath)) continue
+      const note = readObsidianNote(filePath, config)
+      if (!note) continue
+      const docTags = [...new Set(note.tags)].filter(Boolean)
+      const docStatus = String(note.frontMatter?.status || '').trim()
+      docTags.forEach(tag => tagFacet.set(tag, (tagFacet.get(tag) || 0) + 1))
+      if (docStatus) statusFacet.set(docStatus, (statusFacet.get(docStatus) || 0) + 1)
+
+      const tagSet = new Set(docTags.map(tag => tag.toLowerCase()))
+      if (selectedTags.length > 0 && !selectedTags.every(tag => tagSet.has(tag))) continue
+      if (selectedStatus && docStatus.toLowerCase() !== selectedStatus) continue
+      if (cleanQuery && !`${note.title} ${note.relativePath}`.toLowerCase().includes(cleanQuery)) continue
+
+      documents.push({
+        title: note.title,
+        path: note.relativePath,
+        relativePath: note.relativePath,
+        tags: docTags,
+        status: docStatus,
+        created: note.frontMatter?.created || '',
+        updated: note.frontMatter?.updated || '',
+        hasFrontMatter: !!note.frontMatter?.hasFrontMatter,
+        mtime: note.mtime
+      })
+    } catch (_) {}
+  }
+
+  documents.sort((a, b) => new Date(b.updated || b.mtime) - new Date(a.updated || a.mtime) || a.title.localeCompare(b.title, 'zh-Hans-CN'))
+  const tagsFacet = [...tagFacet.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag, 'zh-Hans-CN'))
+    .slice(0, 120)
+  const statuses = [...statusFacet.entries()]
+    .map(([name, count]) => ({ status: name, count }))
+    .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status, 'zh-Hans-CN'))
+
+  return {
+    ok: true,
+    filters: { tags: selectedTags, status: selectedStatus, query: cleanQuery },
+    facets: { tags: tagsFacet, statuses },
+    documents: documents.slice(0, Math.min(Math.max(Number(maxResults) || 200, 1), 1000)),
+    total: documents.length
+  }
+}
+
+function listDocumentLinkCandidates(config, query = '', maxResults = 500) {
+  const cleanQuery = String(query || '').trim().toLowerCase()
+  const tokens = tokenizeSearchText(cleanQuery)
+  const results = []
+  for (const filePath of listMarkdownVaultFiles(config, 5000)) {
+    try {
+      if (!isPathInside(config.vaultPath, filePath)) continue
+      const note = readObsidianNote(filePath, config)
+      if (!note) continue
+      const stem = note.relativePath.replace(/\.md$/i, '')
+      const base = path.basename(note.relativePath, '.md')
+      const aliases = [...new Set([note.title, base, stem, note.relativePath].filter(Boolean))]
+      const haystack = [note.title, note.relativePath, ...note.tags, ...note.headings.slice(0, 4)].join(' ').toLowerCase()
+      let score = cleanQuery ? 0 : 1
+      if (cleanQuery) {
+        if (note.title.toLowerCase().includes(cleanQuery)) score += 20
+        if (base.toLowerCase().includes(cleanQuery)) score += 14
+        if (note.relativePath.toLowerCase().includes(cleanQuery)) score += 9
+        for (const token of tokens) {
+          if (haystack.includes(token)) score += 3
+        }
+      }
+      if (cleanQuery && score <= 0) continue
+      results.push({
+        title: note.title,
+        path: note.relativePath,
+        relativePath: note.relativePath,
+        aliases,
+        headings: note.headings.slice(0, 4),
+        tags: note.tags.slice(0, 6),
+        mtime: note.mtime,
+        score
+      })
+    } catch (_) {}
+  }
+
+  results.sort((a, b) => b.score - a.score || new Date(b.mtime) - new Date(a.mtime))
+  return {
+    ok: true,
+    candidates: results.slice(0, Math.min(Math.max(Number(maxResults) || 500, 1), 1000))
+  }
+}
+
+function normalizeWikiLinkLookupKey(value) {
+  return String(value || '')
+    .split('#')[0]
+    .replace(/\.md$/i, '')
+    .trim()
+    .toLowerCase()
+}
+
+function buildDocumentLinkCandidateIndex(config) {
+  const candidates = listDocumentLinkCandidates(config, '', 5000).candidates || []
+  const index = new Map()
+  for (const candidate of candidates) {
+    const aliases = [
+      candidate.title,
+      candidate.path,
+      String(candidate.path || '').replace(/\.md$/i, ''),
+      ...(candidate.aliases || [])
+    ]
+    for (const alias of aliases) {
+      const key = normalizeWikiLinkLookupKey(alias)
+      if (key && !index.has(key)) index.set(key, candidate)
+    }
+  }
+  return { candidates, index }
+}
+
+function extractWikiLinkTargets(markdown) {
+  return [...String(markdown || '').matchAll(/\[\[([^\]\n]+)]]/g)]
+    .map(match => String(match[1] || '').split('|')[0].split('#')[0].trim())
+    .filter(Boolean)
+}
+
+function buildDocumentBacklinks(relativePath, config, maxResults = 30) {
+  const target = resolveVaultPath(relativePath, config, { requireMarkdown: true })
+  if (!fs.existsSync(target.absolutePath)) throw new Error('文档不存在')
+  const targetRaw = fs.readFileSync(target.absolutePath, 'utf8')
+  const targetTitle = (targetRaw.match(/^#\s+(.+)$/m)?.[1] || path.basename(target.relativePath, '.md')).trim()
+  const targetStem = target.relativePath.replace(/\.md$/i, '')
+  const targetBase = path.basename(target.relativePath, '.md')
+  const aliases = [...new Set([targetTitle, targetBase, targetStem, target.relativePath].filter(Boolean))]
+  const aliasLower = aliases.map(item => String(item).toLowerCase())
+  const titleNeedle = targetTitle.length >= 4 ? targetTitle.toLowerCase() : ''
+  const pathNeedle = target.relativePath.toLowerCase()
+  const stemNeedle = targetStem.toLowerCase()
+  const linkPattern = new RegExp(`\\]\\((?:\\.\\/|\\/)?${escapeRegex(target.relativePath)}(?:#[^)]+)?\\)`, 'i')
+  const results = []
+
+  for (const filePath of listMarkdownVaultFiles(config)) {
+    try {
+      if (!isPathInside(config.vaultPath, filePath)) continue
+      const note = readObsidianNote(filePath, config)
+      if (!note || note.relativePath === target.relativePath) continue
+
+      const rawLower = note.raw.toLowerCase()
+      const reasons = []
+      let score = 0
+      const wikiLinks = [...note.raw.matchAll(/\[\[([^\]]+)]]/g)]
+      const wikiHit = wikiLinks.some(match => {
+        const targetName = String(match[1] || '').split('|')[0].split('#')[0].trim().toLowerCase()
+        return aliasLower.includes(targetName)
+      })
+      if (wikiHit) {
+        reasons.push('WikiLink')
+        score += 30
+      }
+      if (linkPattern.test(note.raw) || rawLower.includes(pathNeedle) || rawLower.includes(stemNeedle)) {
+        reasons.push('路径引用')
+        score += 18
+      }
+      if (titleNeedle && rawLower.includes(titleNeedle)) {
+        reasons.push('标题提及')
+        score += 8
+      }
+      if (score <= 0) continue
+
+      const lines = note.raw.split('\n')
+      const lowerLines = lines.map(line => line.toLowerCase())
+      const hitLine = lowerLines.findIndex(line => (
+        wikiLinks.length && line.includes('[[') && aliasLower.some(alias => line.includes(alias))
+      ) || line.includes(pathNeedle) || line.includes(stemNeedle) || (!!titleNeedle && line.includes(titleNeedle)))
+      const snippet = hitLine >= 0
+        ? lines.slice(Math.max(0, hitLine - 1), Math.min(lines.length, hitLine + 2)).join('\n').trim().slice(0, 360)
+        : buildObsidianSnippet(note, tokenizeSearchText(targetTitle), 260)
+
+      results.push({
+        title: note.title,
+        path: note.relativePath,
+        relativePath: note.relativePath,
+        snippet,
+        reasons,
+        mtime: note.mtime,
+        score
+      })
+    } catch (_) {}
+  }
+
+  results.sort((a, b) => b.score - a.score || new Date(b.mtime) - new Date(a.mtime))
+  return {
+    ok: true,
+    target: {
+      title: targetTitle,
+      path: target.relativePath,
+      aliases
+    },
+    backlinks: results.slice(0, Math.min(Math.max(Number(maxResults) || 30, 1), 80))
+  }
+}
+
+function buildDocumentGraphBase(relativePath, config, maxResults = 60) {
+  const target = resolveVaultPath(relativePath, config, { requireMarkdown: true })
+  if (!fs.existsSync(target.absolutePath)) throw new Error('文档不存在')
+  const targetNote = readObsidianNote(target.absolutePath, config)
+  if (!targetNote) throw new Error('文档过大或无法读取')
+  const { index } = buildDocumentLinkCandidateIndex(config)
+  const nodes = new Map()
+  const edges = new Map()
+  const addNode = (node) => {
+    if (!node?.path) return
+    const previous = nodes.get(node.path) || {}
+    nodes.set(node.path, {
+      id: node.path,
+      path: node.path,
+      title: node.title || previous.title || path.basename(node.path, '.md'),
+      type: node.type || previous.type || 'related',
+      mtime: node.mtime || previous.mtime || ''
+    })
+  }
+  const addEdge = (source, targetPath, type) => {
+    if (!source || !targetPath || source === targetPath) return
+    const id = `${source}->${targetPath}:${type}`
+    if (!edges.has(id)) edges.set(id, { id, source, target: targetPath, type })
+  }
+
+  addNode({ path: targetNote.relativePath, title: targetNote.title, type: 'center', mtime: targetNote.mtime })
+
+  for (const linkTarget of extractWikiLinkTargets(targetNote.raw)) {
+    const candidate = index.get(normalizeWikiLinkLookupKey(linkTarget))
+    if (!candidate?.path || candidate.path === targetNote.relativePath) continue
+    addNode({ path: candidate.path, title: candidate.title, type: 'outbound', mtime: candidate.mtime })
+    addEdge(targetNote.relativePath, candidate.path, 'outbound')
+  }
+
+  const backlinks = buildDocumentBacklinks(targetNote.relativePath, config, maxResults).backlinks || []
+  for (const backlink of backlinks) {
+    if (!backlink.path || backlink.path === targetNote.relativePath) continue
+    addNode({ path: backlink.path, title: backlink.title, type: nodes.has(backlink.path) ? 'bidirectional' : 'inbound', mtime: backlink.mtime })
+    addEdge(backlink.path, targetNote.relativePath, 'inbound')
+  }
+
+  for (const edge of edges.values()) {
+    const sourceNode = nodes.get(edge.source)
+    const targetNode = nodes.get(edge.target)
+    if (!sourceNode || !targetNode) continue
+    if (edge.type === 'outbound' && edges.has(`${edge.target}->${edge.source}:inbound`)) {
+      sourceNode.type = sourceNode.type === 'center' ? sourceNode.type : 'bidirectional'
+      targetNode.type = targetNode.type === 'center' ? targetNode.type : 'bidirectional'
+    }
+  }
+
+  return {
+    ok: true,
+    center: targetNote.relativePath,
+    depth: 1,
+    nodes: [...nodes.values()].slice(0, Math.min(Math.max(Number(maxResults) || 60, 1), 120)),
+    edges: [...edges.values()].slice(0, Math.min(Math.max(Number(maxResults) || 60, 1), 160))
+  }
+}
+
+function buildDocumentGraph(relativePath, config, maxResults = 60, depth = 1) {
+  const safeLimit = Math.min(Math.max(Number(maxResults) || 60, 1), 120)
+  const safeDepth = Math.min(Math.max(Number(depth) || 1, 1), 2)
+  const graph = buildDocumentGraphBase(relativePath, config, safeLimit)
+  if (safeDepth <= 1) return graph
+
+  const nodes = new Map(graph.nodes.map(node => [node.id, node]))
+  const edges = new Map(graph.edges.map(edge => [edge.id, edge]))
+  const directNodes = graph.nodes.filter(node => node.id !== graph.center).slice(0, Math.min(safeLimit, 24))
+
+  for (const node of directNodes) {
+    if (nodes.size >= safeLimit && edges.size >= safeLimit * 2) break
+    try {
+      const local = buildDocumentGraphBase(node.path, config, Math.min(24, safeLimit))
+      for (const localNode of local.nodes) {
+        if (nodes.size >= safeLimit && !nodes.has(localNode.id)) continue
+        if (localNode.id === graph.center) continue
+        if (!nodes.has(localNode.id)) {
+          nodes.set(localNode.id, { ...localNode, type: localNode.id === node.id ? node.type : 'related' })
+        }
+      }
+      for (const edge of local.edges) {
+        if (edges.size >= safeLimit * 2) break
+        if (!nodes.has(edge.source) || !nodes.has(edge.target)) continue
+        if (!edges.has(edge.id)) edges.set(edge.id, edge)
+      }
+    } catch (_) {}
+  }
+
+  const centerNode = nodes.get(graph.center)
+  if (centerNode) centerNode.type = 'center'
+
+  return {
+    ok: true,
+    center: graph.center,
+    depth: safeDepth,
+    nodes: [...nodes.values()],
+    edges: [...edges.values()]
+  }
+}
+
+function clearDocumentWatcher() {
+  if (documentWatchState.watcher) {
+    try { documentWatchState.watcher.close() } catch (_) {}
+  }
+  for (const filePath of documentWatchState.fileWatches.values()) {
+    try { fs.unwatchFile(filePath) } catch (_) {}
+  }
+  for (const timer of documentWatchState.timers.values()) clearTimeout(timer)
+  documentWatchState.key = ''
+  documentWatchState.watcher = null
+  documentWatchState.timers.clear()
+  documentWatchState.fileWatches.clear()
+}
+
+function pushDocumentWatchEvent(event) {
+  documentWatchState.lastId += 1
+  documentWatchState.events.push({
+    id: documentWatchState.lastId,
+    timestamp: new Date().toISOString(),
+    ...event
+  })
+  if (documentWatchState.events.length > 500) {
+    documentWatchState.events = documentWatchState.events.slice(-500)
+  }
+}
+
+function recordDocumentPathChange(config, relativePath, eventType = 'change') {
+  const normalized = normalizeVaultRelativePath(relativePath)
+  if (!normalized.toLowerCase().endsWith('.md')) return
+  if (!shouldIncludeObsidianPath(normalized, config)) return
+
+  const absolutePath = path.resolve(config.vaultPath, normalized)
+  if (!isPathInside(config.vaultPath, absolutePath)) return
+  const timerKey = normalized
+  if (documentWatchState.timers.has(timerKey)) clearTimeout(documentWatchState.timers.get(timerKey))
+  documentWatchState.timers.set(timerKey, setTimeout(() => {
+    documentWatchState.timers.delete(timerKey)
+    try {
+      if (!fs.existsSync(absolutePath)) {
+        pushDocumentWatchEvent({ path: normalized, type: 'deleted', source: 'vault', eventType })
+        return
+      }
+      const stat = fs.statSync(absolutePath)
+      if (!stat.isFile()) return
+      const content = stat.size <= 1024 * 1024 ? fs.readFileSync(absolutePath, 'utf8') : ''
+      pushDocumentWatchEvent({
+        path: normalized,
+        type: eventType === 'rename' ? 'renamed' : 'changed',
+        source: 'vault',
+        revision: content ? hashContent(content) : '',
+        mtime: stat.mtime.toISOString(),
+        size: stat.size
+      })
+    } catch (error) {
+      documentWatchState.error = error.message
+    }
+  }, 250))
+}
+
+function ensureDocumentWatcher(config) {
+  const watcherKey = JSON.stringify({
+    vaultPath: config.vaultPath,
+    includeFolders: config.includeFolders,
+    excludeFolders: config.excludeFolders
+  })
+  if (documentWatchState.key === watcherKey && documentWatchState.watcher) {
+    return { active: !documentWatchState.error, error: documentWatchState.error, lastEventId: documentWatchState.lastId }
+  }
+
+  clearDocumentWatcher()
+  documentWatchState.key = watcherKey
+  documentWatchState.error = ''
+
+  try {
+    documentWatchState.watcher = fs.watch(config.vaultPath, { recursive: true }, (eventType, filename) => {
+      if (!filename) return
+      try {
+        recordDocumentPathChange(config, String(filename).split(path.sep).join('/'), eventType)
+      } catch (error) {
+        documentWatchState.error = error.message
+      }
+    })
+    documentWatchState.watcher.on('error', error => {
+      documentWatchState.error = error.message
+      try { documentWatchState.watcher?.close() } catch (_) {}
+      documentWatchState.watcher = null
+    })
+    return { active: true, error: '', lastEventId: documentWatchState.lastId }
+  } catch (error) {
+    documentWatchState.error = error.message
+    return { active: false, error: error.message, lastEventId: documentWatchState.lastId }
+  }
+}
+
+function ensureDocumentFileWatcher(config, relativePath) {
+  const resolved = resolveVaultPath(relativePath, config, { requireMarkdown: true })
+  const watchKey = `${config.vaultPath}:${resolved.relativePath}`
+  if (documentWatchState.fileWatches.has(watchKey)) return
+  documentWatchState.fileWatches.set(watchKey, resolved.absolutePath)
+  fs.watchFile(resolved.absolutePath, { interval: 1200, persistent: false }, (current, previous) => {
+    if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return
+    recordDocumentPathChange(config, resolved.relativePath, current.nlink === 0 ? 'rename' : 'change')
+  })
+}
+
+function getDocumentFileStatus(relativePath, config) {
+  const resolved = resolveVaultPath(relativePath, config, { requireMarkdown: true })
+  if (!fs.existsSync(resolved.absolutePath)) {
+    return { path: resolved.relativePath, exists: false, revision: '', mtime: '', size: 0 }
+  }
+  const stat = fs.statSync(resolved.absolutePath)
+  if (!stat.isFile()) throw new Error('不是文件')
+  const content = stat.size <= 1024 * 1024 ? fs.readFileSync(resolved.absolutePath, 'utf8') : ''
+  return {
+    path: resolved.relativePath,
+    exists: true,
+    revision: content ? hashContent(content) : '',
+    mtime: stat.mtime.toISOString(),
+    size: stat.size
+  }
+}
+
+function selectDefaultModelKey() {
+  const settings = loadSettings()
+  if (settings.models?.defaultModel) return settings.models.defaultModel
+  const config = loadLocalConfig()
+  if (config.models?.providers) {
+    for (const [providerId, providerData] of Object.entries(config.models.providers)) {
+      const first = Array.isArray(providerData.models) ? providerData.models.find(model => model?.id) : null
+      if (first?.id) return `${providerId}/${first.id}`
+    }
+  }
+  const ccModel = getCcSwitchModelList()[0]
+  if (ccModel?.id) return `cc-switch/${ccModel.id}`
+  return ''
+}
+
+function resolveConfiguredModel(modelKey) {
+  const config = loadLocalConfig()
+  const selected = String(modelKey || selectDefaultModelKey() || '')
+  if (!selected) throw new Error('未选择可用模型')
+
+  const [providerId, ...modelParts] = selected.split('/')
+  const model = modelParts.join('/') || selected
+
+  if (providerId === 'cc-switch' || providerId === 'ccswitch') {
+    const route = getCurrentCcSwitchOpenClawProvider()
+    const fallbackModel = (Array.isArray(route?.settings?.models) ? route.settings.models : []).find(item => item?.id)?.id
+    if (!route || !route.settings?.baseUrl || !route.settings?.apiKey) throw new Error('CC Switch 当前路由不可用')
+    return {
+      provider: getCcSwitchApiProtocol(route.settings.api),
+      providerId,
+      apiKey: route.settings.apiKey,
+      baseUrl: route.settings.baseUrl,
+      model: model || fallbackModel,
+      requestedModel: selected
+    }
+  }
+
+  const providerConfig = config.providers?.[providerId] || config.models?.providers?.[providerId]
+  const apiKey = providerConfig?.apiKey
+  const baseUrl = providerConfig?.baseUrl || KNOWN_PROVIDERS[providerId]?.baseUrl
+  if (!apiKey || !baseUrl) throw new Error(`${providerId} 缺少 API Key 或 Base URL`)
+  return {
+    provider: providerId,
+    providerId,
+    apiKey,
+    baseUrl,
+    model,
+    requestedModel: selected
+  }
+}
+
+async function callInternalAgent({ modelKey, messages, maxTokens = 4000, temperature = 0.4 }) {
+  const resolved = resolveConfiguredModel(modelKey)
+  const result = await callProviderAI({
+    provider: resolved.provider,
+    apiKey: resolved.apiKey,
+    baseUrl: resolved.baseUrl,
+    model: resolved.model,
+    messages,
+    options: { maxTokens, temperature }
+  })
+  if (!result.success) throw new Error(result.error || `模型调用失败 (${result.statusCode || 'unknown'})`)
+  return { text: result.data.text || '', model: resolved.requestedModel }
+}
+
+function getTranscriptionConfig(overrides = {}) {
+  const settings = loadSettings()
+  return {
+    ...DEFAULT_TRANSCRIPTION_SETTINGS,
+    ...(settings.transcription || {}),
+    ...(overrides || {})
+  }
+}
+
+async function transcribeAudioFile(audioPath, overrides = {}) {
+  if (!audioPath || !fs.existsSync(audioPath)) {
+    return { text: '', provider: '', error: '录音文件不存在' }
+  }
+
+  const config = getTranscriptionConfig(overrides)
+  if (!config.enabled || config.provider === 'browser') {
+    return { text: '', provider: config.provider, error: '未启用服务端转写 Provider' }
+  }
+
+  if (config.provider !== 'openai-compatible') {
+    return { text: '', provider: config.provider, error: `暂不支持转写 Provider: ${config.provider}` }
+  }
+
+  const cleanBaseUrl = String(config.baseUrl || '').replace(/\/+$/, '')
+  if (!cleanBaseUrl || !config.apiKey || !config.model) {
+    return { text: '', provider: config.provider, error: '转写 Provider 缺少 baseUrl/apiKey/model' }
+  }
+
+  try {
+    const audioBuffer = fs.readFileSync(audioPath)
+    const form = new FormData()
+    form.append('file', new Blob([audioBuffer]), path.basename(audioPath))
+    form.append('model', String(config.model))
+    if (config.language) form.append('language', String(config.language))
+
+    const response = await fetch(`${cleanBaseUrl}/audio/transcriptions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.apiKey}` },
+      body: form,
+      signal: AbortSignal.timeout(120000)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      return { text: '', provider: config.provider, error: data?.error?.message || `HTTP ${response.status}` }
+    }
+    const text = data.text || data.transcript || data.result || ''
+    return { text: String(text || '').trim(), provider: config.provider, model: config.model, error: '' }
+  } catch (error) {
+    return { text: '', provider: config.provider, error: error.message }
+  }
+}
+
+function meetingManifestPath(meetingId) {
+  return path.join(MEETINGS_DIR, meetingId, 'manifest.json')
+}
+
+function loadMeeting(meetingId) {
+  const manifestPath = meetingManifestPath(meetingId)
+  if (!fs.existsSync(manifestPath)) return null
+  return JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+}
+
+function saveMeeting(meeting) {
+  const meetingDir = path.join(MEETINGS_DIR, meeting.id)
+  fs.mkdirSync(meetingDir, { recursive: true })
+  fs.writeFileSync(meetingManifestPath(meeting.id), JSON.stringify(meeting, null, 2))
+}
+
+function readTextFileIfExists(filePath) {
+  try {
+    return filePath && fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : ''
+  } catch (_) {
+    return ''
+  }
+}
+
+function meetingSummary(meeting) {
+  const transcript = readTextFileIfExists(meeting.transcriptPath)
+  const minutes = readTextFileIfExists(meeting.minutesPath)
+  return {
+    ...meeting,
+    hasAudio: !!(meeting.audioPath && fs.existsSync(meeting.audioPath)),
+    hasTranscript: !!transcript,
+    hasMinutes: !!minutes,
+    transcriptLength: transcript.length,
+    minutesLength: minutes.length
+  }
+}
+
+function listMeetings() {
+  if (!fs.existsSync(MEETINGS_DIR)) return []
+  return fs.readdirSync(MEETINGS_DIR, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => loadMeeting(entry.name))
+    .filter(Boolean)
+    .map(meetingSummary)
+    .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))
+}
+
+function buildFallbackMinutes({ title, transcript, audioPath }) {
+  const now = new Date().toISOString()
+  const lines = [
+    '---',
+    'type: meeting-minutes',
+    'source: lingshu-document-workbench',
+    `created_at: ${now}`,
+    audioPath ? `audio_path: ${audioPath}` : '',
+    '---',
+    '',
+    `# ${title}`,
+    '',
+    '## 摘要',
+    '',
+    transcript ? '待补充：当前模型纪要生成失败，已保留逐字稿，可稍后重新生成。' : '未获得逐字稿。已保存录音，配置转写服务后可重新生成纪要。',
+    '',
+    '## 待办',
+    '',
+    '- 待梳理',
+    '',
+    '## 逐字稿',
+    '',
+    transcript || '_暂无逐字稿_'
+  ]
+  return lines.filter(line => line !== '').join('\n')
+}
+
+function writeMinutesToVault({ title, content }) {
+  const vault = getMarkdownVaultConfig()
+  if (!vault.ok) return null
+  const date = new Date().toISOString().slice(0, 10)
+  const dir = path.join(vault.config.vaultPath, '会议纪要')
+  fs.mkdirSync(dir, { recursive: true })
+  let filePath = path.join(dir, `${date}-${safeDocumentTitle(title)}.md`)
+  let suffix = 2
+  while (fs.existsSync(filePath)) {
+    filePath = path.join(dir, `${date}-${safeDocumentTitle(title)}-${suffix}.md`)
+    suffix++
+  }
+  if (!isPathInside(vault.config.vaultPath, filePath)) throw new Error('非法会议纪要写入路径')
+  atomicWriteTextFile(filePath, content)
+  return {
+    absolutePath: filePath,
+    relativePath: path.relative(vault.config.vaultPath, filePath).split(path.sep).join('/')
   }
 }
 
@@ -556,6 +2107,146 @@ function saveLocalConfig(config) {
   const configPath = getLocalConfigPath()
   fs.mkdirSync(path.dirname(configPath), { recursive: true })
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
+
+const DEFAULT_TOOL_RUNTIME_SECURITY = {
+  allowExecution: false,
+  requireConfirmation: true,
+  allowedCommands: ['open', 'git', 'npm', 'node', 'python3', 'system_profiler'],
+  blockedPatterns: ['rm -rf', 'sudo ', 'chmod -R', 'chown -R', 'mkfs', 'diskutil erase', 'dd if=', 'curl |', 'wget |', ':(){', '> /dev/'],
+  timeoutMs: 15000,
+  maxOutputChars: 4000,
+  maxParamLength: 500,
+  maxCommandLength: 2000
+}
+
+function normalizeRuntimeStringList(value, fallback = []) {
+  if (Array.isArray(value)) return value.map(item => String(item).trim()).filter(Boolean)
+  if (typeof value === 'string') {
+    return value.split(/[\n,]/).map(item => item.trim()).filter(Boolean)
+  }
+  return [...fallback]
+}
+
+function getToolRuntimeSecurity(config = loadLocalConfig()) {
+  const saved = config?.tools?.runtime?.security || {}
+  return {
+    ...DEFAULT_TOOL_RUNTIME_SECURITY,
+    ...saved,
+    allowedCommands: normalizeRuntimeStringList(saved.allowedCommands, DEFAULT_TOOL_RUNTIME_SECURITY.allowedCommands),
+    blockedPatterns: normalizeRuntimeStringList(saved.blockedPatterns, DEFAULT_TOOL_RUNTIME_SECURITY.blockedPatterns),
+    timeoutMs: Number(saved.timeoutMs || DEFAULT_TOOL_RUNTIME_SECURITY.timeoutMs),
+    maxOutputChars: Number(saved.maxOutputChars || DEFAULT_TOOL_RUNTIME_SECURITY.maxOutputChars),
+    maxParamLength: Number(saved.maxParamLength || DEFAULT_TOOL_RUNTIME_SECURITY.maxParamLength),
+    maxCommandLength: Number(saved.maxCommandLength || DEFAULT_TOOL_RUNTIME_SECURITY.maxCommandLength)
+  }
+}
+
+function saveToolRuntimeSecurity(input) {
+  const config = loadLocalConfig()
+  if (!config.tools) config.tools = {}
+  if (!config.tools.runtime) config.tools.runtime = {}
+  config.tools.runtime.security = getToolRuntimeSecurity({ tools: { runtime: { security: input || {} } } })
+  saveLocalConfig(config)
+  return config.tools.runtime.security
+}
+
+function extractCliTemplateVariables(template = '') {
+  return [...new Set(Array.from(String(template).matchAll(/\{([a-zA-Z0-9_]+)\}/g)).map(match => match[1]))]
+}
+
+function escapeCliParamValue(value) {
+  return String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`')
+    .replace(/[\r\n]/g, ' ')
+}
+
+function findToolRuntimeCliCommand(config, commandId) {
+  const commands = Array.isArray(config?.tools?.exec?.commands) ? config.tools.exec.commands : []
+  const found = commands.find((cmd, idx) => (cmd.name || `cli-${idx}`) === commandId || cmd.id === commandId)
+  if (!found) return null
+  return {
+    id: found.name || found.id || commandId,
+    name: found.label || found.name || commandId,
+    command: found.command || found.name || '',
+    description: found.description || found.label || '',
+    category: found.category || '通用',
+    enabled: found.enabled === true
+  }
+}
+
+function materializeCliCommand(template, params = {}, security = getToolRuntimeSecurity()) {
+  const variables = extractCliTemplateVariables(template)
+  const errors = []
+  let command = String(template || '')
+  for (const variable of variables) {
+    if (!Object.prototype.hasOwnProperty.call(params, variable)) {
+      errors.push(`缺少参数：${variable}`)
+      continue
+    }
+    const value = String(params[variable] ?? '')
+    if (value.length > security.maxParamLength) {
+      errors.push(`参数过长：${variable}`)
+      continue
+    }
+    command = command.replaceAll(`{${variable}}`, escapeCliParamValue(value))
+  }
+  return { command, variables, errors }
+}
+
+function redactRuntimeText(text = '') {
+  return String(text)
+    .replace(/(api[_-]?key|token|secret|password)=([^\s]+)/ig, '$1=***')
+    .replace(/(sk-[A-Za-z0-9_-]{12,})/g, 'sk-***')
+}
+
+function validateToolRuntimeCommand({ commandConfig, command, confirmed = false, executionRequested = false, security }) {
+  const errors = []
+  const warnings = []
+  const trimmed = String(command || '').trim()
+  if (!commandConfig) errors.push('命令不存在')
+  if (commandConfig && commandConfig.enabled !== true) errors.push('命令未启用')
+  if (!trimmed) errors.push('命令为空')
+  if (trimmed.length > security.maxCommandLength) errors.push('命令长度超过限制')
+  const executable = trimmed.split(/\s+/)[0]?.replace(/^['"]|['"]$/g, '') || ''
+  if (executable && !security.allowedCommands.includes(executable)) {
+    errors.push(`命令不在白名单中：${executable}`)
+  }
+  const lower = trimmed.toLowerCase()
+  const matchedPattern = security.blockedPatterns.find(pattern => lower.includes(String(pattern).toLowerCase()))
+  if (matchedPattern) errors.push(`命中阻断规则：${matchedPattern}`)
+  if (/[;&|]{2,}/.test(trimmed)) warnings.push('命令包含 shell 组合操作符，请确认是否必要')
+  if (executionRequested && security.requireConfirmation && confirmed !== true) errors.push('需要执行前确认')
+  if (executionRequested && security.allowExecution !== true) errors.push('实际执行未开放')
+  return { ok: errors.length === 0, errors, warnings, executable }
+}
+
+function appendToolRuntimeAudit(entry) {
+  const safeEntry = {
+    id: `tool_audit_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+    timestamp: new Date().toISOString(),
+    ...entry,
+    commandPreview: redactRuntimeText(entry.commandPreview || '')
+  }
+  fs.appendFileSync(TOOL_RUNTIME_AUDIT_FILE, `${JSON.stringify(safeEntry)}\n`)
+  return safeEntry
+}
+
+function readToolRuntimeAudit(limit = 200) {
+  if (!fs.existsSync(TOOL_RUNTIME_AUDIT_FILE)) return []
+  return fs.readFileSync(TOOL_RUNTIME_AUDIT_FILE, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .slice(-limit)
+    .map(line => {
+      try { return JSON.parse(line) } catch (_) { return null }
+    })
+    .filter(Boolean)
+    .reverse()
 }
 
 function hasApiKey(config, providerId) {
@@ -899,18 +2590,102 @@ app.get('/api/instances', (req, res) => {
   res.json(instances)
 })
 
+app.get('/api/local-agent-apps', (req, res) => {
+  try {
+    const apps = scanLocalAgentApps()
+    const existing = new Set(instances
+      .filter(instance => instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop')
+      .flatMap(instance => [
+        String(instance.appName || '').toLowerCase(),
+        String(instance.name || '').toLowerCase(),
+        String(instance.bundleId || '').toLowerCase(),
+        String(instance.configPath || '').toLowerCase()
+      ].filter(Boolean)))
+
+    res.json({
+      apps: apps.map(appInfo => ({
+        ...appInfo,
+        instanceExists: existing.has(String(appInfo.displayName || appInfo.name).toLowerCase())
+          || existing.has(String(appInfo.name || '').toLowerCase())
+          || existing.has(String(appInfo.bundleId || '').toLowerCase())
+          || existing.has(String(appInfo.path || '').toLowerCase())
+      }))
+    })
+  } catch (error) {
+    res.status(500).json({ error: '扫描本机 Agent 失败', message: error.message })
+  }
+})
+
+app.post('/api/local-agent-apps/seed-instances', (req, res) => {
+  try {
+    const requestedApps = Array.isArray(req.body?.apps) ? req.body.apps : scanLocalAgentApps()
+    const added = []
+    for (const appInfo of requestedApps) {
+      const appName = String(appInfo.displayName || appInfo.name || '').trim()
+      const appPath = String(appInfo.path || '').trim()
+      if (!appName || !appPath || !fs.existsSync(appPath)) continue
+
+      const exists = instances.some(instance =>
+        (instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop')
+        && (
+          String(instance.appName || '').toLowerCase() === appName.toLowerCase()
+          || String(instance.name || '').toLowerCase() === appName.toLowerCase()
+          || (appInfo.bundleId && String(instance.bundleId || '').toLowerCase() === String(appInfo.bundleId).toLowerCase())
+          || String(instance.configPath || '').toLowerCase() === appPath.toLowerCase()
+        )
+      )
+      if (exists) continue
+
+      const slug = safeInstanceSlug(appName)
+      const newInstance = {
+        id: `${slug}-desktop-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+        name: appName,
+        type: 'agent-desktop',
+        status: 'disconnected',
+        appName,
+        bundleId: appInfo.bundleId || '',
+        configPath: appPath,
+        workspacePath: '~/.stepclaw/workspace',
+        invocationMode: appInfo.invocation?.suggestedInvocationMode || 'open',
+        urlScheme: appInfo.invocation?.urlScheme || '',
+        urlTemplate: appInfo.invocation?.urlScheme ? `${appInfo.invocation.urlScheme}://` : '',
+        cliCommand: appInfo.invocation?.cliCommand || '',
+        cliArgsTemplate: appInfo.invocation?.cliCommand ? '{{instruction}}' : '',
+        invocationCapabilities: appInfo.invocation || {},
+        description: `本机扫描发现的 Agent 桌面端：${appName}`,
+        createdAt: new Date().toISOString()
+      }
+      instances.push(newInstance)
+      added.push(newInstance)
+    }
+
+    if (added.length > 0) saveInstances(instances)
+    res.json({ success: true, added, count: added.length })
+  } catch (error) {
+    res.status(500).json({ error: '加入本机 Agent 实例失败', message: error.message })
+  }
+})
+
 // 添加新实例
 app.post('/api/instances', (req, res) => {
-  const { name, type, host, port, configPath, description } = req.body
+  const { name, type, host, port, configPath, workspacePath, appName, bundleId, description, invocationMode, urlScheme, urlTemplate, cliCommand, cliArgsTemplate } = req.body
   
   const newInstance = {
     id: `instance-${Date.now()}`,
     name,
-    type,
+    type: type === 'stepfun-desktop' ? 'agent-desktop' : type,
     host,
     port,
     configPath,
+    workspacePath,
+    appName,
+    bundleId,
     description,
+    invocationMode,
+    urlScheme,
+    urlTemplate,
+    cliCommand,
+    cliArgsTemplate,
     status: 'disconnected',
     createdAt: new Date().toISOString()
   }
@@ -955,8 +2730,8 @@ app.post('/api/instances/:id/test', async (req, res) => {
   
   try {
     // 根据类型测试连接
-    if (instance.type === 'local' || instance.type === 'stepfun-desktop') {
-      // 测试本地 OpenClaw
+    if (instance.type === 'local') {
+      // 测试本地灵枢运行时配置
       const configPath = instance.configPath.replace('~', os.homedir())
       if (fs.existsSync(configPath)) {
         instance.status = 'connected'
@@ -967,6 +2742,31 @@ app.post('/api/instances/:id/test', async (req, res) => {
         instance.status = 'error'
         saveInstances(instances)
         res.json({ success: false, status: 'error', message: '配置文件不存在' })
+      }
+    } else if (instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop') {
+      const appName = instance.appName || instance.name
+      const configuredPath = instance.configPath ? instance.configPath.replace('~', os.homedir()) : ''
+      const appPath = configuredPath.endsWith('.app') && fs.existsSync(configuredPath)
+        ? configuredPath
+        : findInstalledMacAppPath(appName)
+
+      if (appPath) {
+        instance.type = 'agent-desktop'
+        instance.status = 'connected'
+        instance.configPath = appPath
+        instance.appName = appName
+        instance.lastConnected = new Date().toISOString()
+        saveInstances(instances)
+        res.json({ success: true, status: 'connected', appName, appPath })
+      } else {
+        instance.type = 'agent-desktop'
+        instance.status = 'error'
+        saveInstances(instances)
+        res.json({
+          success: false,
+          status: 'error',
+          message: `未找到桌面 Agent 应用：${appName}。请确认它已安装在 /Applications 或 ~/Applications。`
+        })
       }
     } else if (instance.type === 'remote') {
       // 测试远程连接
@@ -1027,12 +2827,30 @@ app.post('/api/instances/:id/restart', (req, res) => {
     return res.status(404).json({ error: '实例不存在' })
   }
   
-  if (instance.type === 'local' || instance.type === 'stepfun-desktop') {
+  if (instance.type === 'local') {
     exec('openclaw gateway restart', (error, stdout, stderr) => {
       if (error) {
         res.status(500).json({ error: '重启失败', message: error.message })
       } else {
         res.json({ success: true, message: 'OpenClaw 已重启' })
+      }
+    })
+  } else if (instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop') {
+    const appName = instance.appName || instance.name
+    const configuredPath = instance.configPath ? instance.configPath.replace('~', os.homedir()) : ''
+    const appPath = configuredPath.endsWith('.app') && fs.existsSync(configuredPath)
+      ? configuredPath
+      : findInstalledMacAppPath(appName)
+
+    if (!appPath) {
+      return res.status(404).json({ success: false, message: `未找到桌面 Agent 应用：${appName}` })
+    }
+
+    execFile('open', [appPath], { timeout: 10000 }, (error) => {
+      if (error) {
+        res.status(500).json({ success: false, message: error.message })
+      } else {
+        res.json({ success: true, message: `${appName} 已打开`, appPath })
       }
     })
   } else {
@@ -1136,6 +2954,111 @@ app.post('/api/config', (req, res) => {
 })
 
 
+
+// ==================== 工具运行时安全 API ====================
+
+app.get('/api/tool-runtime/security', (req, res) => {
+  try {
+    res.json(getToolRuntimeSecurity())
+  } catch (error) {
+    res.status(500).json({ error: '读取工具运行时安全策略失败', message: error.message })
+  }
+})
+
+app.post('/api/tool-runtime/security', (req, res) => {
+  try {
+    const security = saveToolRuntimeSecurity(req.body || {})
+    appendToolRuntimeAudit({ action: 'security.update', status: 'saved', commandPreview: 'tool runtime security policy updated' })
+    res.json({ success: true, security })
+  } catch (error) {
+    res.status(500).json({ error: '保存工具运行时安全策略失败', message: error.message })
+  }
+})
+
+app.get('/api/tool-runtime/audit', (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit || 200), 1), 1000)
+    res.json(readToolRuntimeAudit(limit))
+  } catch (error) {
+    res.status(500).json({ error: '读取工具运行时审计失败', message: error.message })
+  }
+})
+
+app.post('/api/tool-runtime/cli/preview', (req, res) => {
+  try {
+    const { commandId, params = {} } = req.body || {}
+    const config = loadLocalConfig()
+    const security = getToolRuntimeSecurity(config)
+    const commandConfig = findToolRuntimeCliCommand(config, commandId)
+    const materialized = materializeCliCommand(commandConfig?.command || '', params, security)
+    const validation = validateToolRuntimeCommand({ commandConfig, command: materialized.command, security })
+    validation.errors.push(...materialized.errors)
+    validation.ok = validation.errors.length === 0
+    const audit = appendToolRuntimeAudit({
+      action: 'cli.preview',
+      commandId,
+      status: validation.ok ? 'allowed' : 'blocked',
+      reason: validation.errors.join('; '),
+      commandPreview: materialized.command
+    })
+    res.json({
+      success: true,
+      commandId,
+      command: redactRuntimeText(materialized.command),
+      variables: materialized.variables,
+      validation,
+      auditId: audit.id
+    })
+  } catch (error) {
+    res.status(500).json({ error: '预览 CLI 命令失败', message: error.message })
+  }
+})
+
+app.post('/api/tool-runtime/cli/run', (req, res) => {
+  try {
+    const { commandId, params = {}, confirmed = false } = req.body || {}
+    const config = loadLocalConfig()
+    const security = getToolRuntimeSecurity(config)
+    const commandConfig = findToolRuntimeCliCommand(config, commandId)
+    const materialized = materializeCliCommand(commandConfig?.command || '', params, security)
+    const validation = validateToolRuntimeCommand({ commandConfig, command: materialized.command, confirmed, executionRequested: true, security })
+    validation.errors.push(...materialized.errors)
+    validation.ok = validation.errors.length === 0
+    if (!validation.ok) {
+      const audit = appendToolRuntimeAudit({
+        action: 'cli.run',
+        commandId,
+        status: 'blocked',
+        reason: validation.errors.join('; '),
+        commandPreview: materialized.command
+      })
+      return res.status(403).json({ success: false, validation, auditId: audit.id })
+    }
+
+    const startedAt = Date.now()
+    exec(materialized.command, { timeout: security.timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout = '', stderr = '') => {
+      const output = `${stdout}${stderr ? `\n${stderr}` : ''}`.slice(0, security.maxOutputChars)
+      const audit = appendToolRuntimeAudit({
+        action: 'cli.run',
+        commandId,
+        status: error ? 'failed' : 'completed',
+        reason: error?.message || '',
+        durationMs: Date.now() - startedAt,
+        commandPreview: materialized.command
+      })
+      res.status(error ? 500 : 200).json({
+        success: !error,
+        output,
+        error: error?.message,
+        durationMs: Date.now() - startedAt,
+        auditId: audit.id
+      })
+    })
+  } catch (error) {
+    res.status(500).json({ error: '执行 CLI 命令失败', message: error.message })
+  }
+})
+
 app.put('/api/config/providers/:providerId', (req, res) => {
   try {
     const config = loadLocalConfig()
@@ -1234,6 +3157,241 @@ app.get('/api/models', (req, res) => {
   }
 })
 
+// ==================== 多 Agent 群聊 API ====================
+
+function safeGroupChatId(id) {
+  return String(id || '').replace(/[^a-zA-Z0-9_-]/g, '')
+}
+
+function getGroupChatPath(sessionId) {
+  const safeId = safeGroupChatId(sessionId)
+  if (!safeId) throw new Error('非法群聊 ID')
+  return path.join(GROUP_CHAT_DIR, `${safeId}.json`)
+}
+
+function normalizeGroupParticipant(input = {}, index = 0) {
+  return {
+    agentId: String(input.agentId || input.name || `Agent-${index + 1}`).trim(),
+    model: String(input.model || '').trim(),
+    provider: String(input.provider || '').trim(),
+    avatarColor: input.avatarColor || ['#1890ff', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#13c2c2'][index % 6]
+  }
+}
+
+function summarizeGroupSession(session) {
+  return {
+    id: session.id,
+    name: session.name || '群聊',
+    mode: session.mode || 'all',
+    participantCount: Array.isArray(session.participants) ? session.participants.length : 0,
+    messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt
+  }
+}
+
+function loadGroupSession(sessionId) {
+  const filePath = getGroupChatPath(sessionId)
+  if (!fs.existsSync(filePath)) return null
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+}
+
+function saveGroupSession(session) {
+  fs.mkdirSync(GROUP_CHAT_DIR, { recursive: true })
+  const filePath = getGroupChatPath(session.id)
+  const next = { ...session, updatedAt: new Date().toISOString() }
+  atomicWriteTextFile(filePath, JSON.stringify(next, null, 2))
+  return next
+}
+
+function createGroupSession(input = {}) {
+  const now = new Date().toISOString()
+  const participants = Array.isArray(input.participants) ? input.participants.map(normalizeGroupParticipant) : []
+  const session = {
+    id: `group-${Date.now()}`,
+    name: String(input.name || '新群聊').trim() || '新群聊',
+    mode: ['all', 'sequential', 'free'].includes(input.mode) ? input.mode : 'all',
+    participants,
+    messages: [],
+    createdAt: now,
+    updatedAt: now
+  }
+  return saveGroupSession(session)
+}
+
+function buildGroupAgentMessages({ session, agent, userMessage }) {
+  const recent = (session.messages || []).slice(-12).map(msg => ({
+    role: msg.role === 'assistant' ? 'assistant' : 'user',
+    content: `${msg.sender || msg.role}: ${msg.content}`
+  }))
+  return [
+    {
+      role: 'system',
+      content: [
+        `你正在参加一个多 Agent 协作群聊。你的身份是：${agent.agentId}。`,
+        `群聊名称：${session.name || '群聊'}。`,
+        '请基于上下文给出清晰、可执行、不要重复他人观点的回复。',
+        '如果信息不足，请直接说明需要补充什么。'
+      ].join('\n')
+    },
+    ...recent,
+    { role: 'user', content: userMessage }
+  ]
+}
+
+function selectGroupResponders({ participants, mode, mentionAgent, messageCount }) {
+  const ready = participants.filter(p => p.agentId && p.model)
+  if (mentionAgent) return ready.filter(p => p.agentId === mentionAgent)
+  if (mode === 'free') return []
+  if (mode === 'sequential') {
+    if (ready.length === 0) return []
+    return [ready[messageCount % ready.length]]
+  }
+  return ready
+}
+
+app.get('/api/group-chat/sessions', (req, res) => {
+  try {
+    if (!fs.existsSync(GROUP_CHAT_DIR)) return res.json([])
+    const sessions = fs.readdirSync(GROUP_CHAT_DIR)
+      .filter(file => file.endsWith('.json'))
+      .map(file => {
+        try { return summarizeGroupSession(JSON.parse(fs.readFileSync(path.join(GROUP_CHAT_DIR, file), 'utf8'))) }
+        catch (_) { return null }
+      })
+      .filter(Boolean)
+      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+    res.json(sessions)
+  } catch (error) {
+    res.status(500).json({ error: '读取群聊列表失败', message: error.message })
+  }
+})
+
+app.post('/api/group-chat/sessions', (req, res) => {
+  try {
+    const session = createGroupSession(req.body || {})
+    res.json(summarizeGroupSession(session))
+  } catch (error) {
+    res.status(500).json({ error: '创建群聊失败', message: error.message })
+  }
+})
+
+app.get('/api/group-chat/sessions/:sessionId', (req, res) => {
+  try {
+    const session = loadGroupSession(req.params.sessionId)
+    if (!session) return res.status(404).json({ error: '群聊不存在' })
+    res.json(session)
+  } catch (error) {
+    res.status(500).json({ error: '读取群聊失败', message: error.message })
+  }
+})
+
+app.patch('/api/group-chat/sessions/:sessionId', (req, res) => {
+  try {
+    const session = loadGroupSession(req.params.sessionId)
+    if (!session) return res.status(404).json({ error: '群聊不存在' })
+    const body = req.body || {}
+    const updated = saveGroupSession({
+      ...session,
+      name: body.name !== undefined ? String(body.name || '群聊') : session.name,
+      mode: ['all', 'sequential', 'free'].includes(body.mode) ? body.mode : session.mode,
+      participants: Array.isArray(body.participants) ? body.participants.map(normalizeGroupParticipant) : session.participants
+    })
+    res.json(updated)
+  } catch (error) {
+    res.status(500).json({ error: '更新群聊失败', message: error.message })
+  }
+})
+
+app.delete('/api/group-chat/sessions/:sessionId', (req, res) => {
+  try {
+    const filePath = getGroupChatPath(req.params.sessionId)
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    res.json({ success: true })
+  } catch (error) {
+    res.status(500).json({ error: '删除群聊失败', message: error.message })
+  }
+})
+
+app.post('/api/group-chat', async (req, res) => {
+  try {
+    const { sessionId, message, participants = [], mode = 'all', mentionAgent } = req.body || {}
+    const content = String(message || '').trim()
+    if (!content) return res.status(400).json({ error: '消息不能为空' })
+
+    let session = sessionId ? loadGroupSession(sessionId) : null
+    if (!session) {
+      session = createGroupSession({ name: content.slice(0, 20) || '新群聊', participants, mode })
+    } else {
+      session.participants = Array.isArray(participants) ? participants.map(normalizeGroupParticipant) : session.participants
+      session.mode = ['all', 'sequential', 'free'].includes(mode) ? mode : session.mode
+    }
+
+    const userMessage = {
+      id: `msg-${Date.now()}`,
+      role: 'user',
+      sender: 'You',
+      content,
+      timestamp: new Date().toISOString()
+    }
+    session.messages = [...(session.messages || []), userMessage]
+
+    const responders = selectGroupResponders({
+      participants: session.participants || [],
+      mode: session.mode,
+      mentionAgent,
+      messageCount: session.messages.filter(msg => msg.role === 'assistant').length
+    })
+
+    const assistantMessages = []
+    for (const agent of responders) {
+      try {
+        const result = await callInternalAgent({
+          modelKey: agent.model,
+          messages: buildGroupAgentMessages({ session, agent, userMessage: content }),
+          maxTokens: 3000,
+          temperature: 0.5
+        })
+        assistantMessages.push({
+          id: `msg-${Date.now()}-${assistantMessages.length}`,
+          role: 'assistant',
+          sender: agent.agentId,
+          content: result.text || '（无回复）',
+          model: result.model || agent.model,
+          provider: agent.provider,
+          timestamp: new Date().toISOString()
+        })
+      } catch (error) {
+        assistantMessages.push({
+          id: `msg-${Date.now()}-${assistantMessages.length}`,
+          role: 'assistant',
+          sender: agent.agentId,
+          content: `调用失败：${error.message}`,
+          model: agent.model,
+          provider: agent.provider,
+          timestamp: new Date().toISOString()
+        })
+      }
+    }
+
+    if (responders.length === 0) {
+      assistantMessages.push({
+        id: `msg-${Date.now()}-empty`,
+        role: 'assistant',
+        sender: '系统',
+        content: mentionAgent ? `未找到可回复的 Agent：${mentionAgent}` : '当前模式下没有可回复的 Agent。请为参与者选择模型，或在自由发言模式下 @ 指定 Agent。',
+        timestamp: new Date().toISOString()
+      })
+    }
+
+    session.messages.push(...assistantMessages)
+    const saved = saveGroupSession(session)
+    res.json({ sessionId: saved.id, messages: assistantMessages, session: summarizeGroupSession(saved) })
+  } catch (error) {
+    res.status(500).json({ error: '群聊发送失败', message: error.message })
+  }
+})
+
 // ==================== 聊天 API（实例级别）====================
 
 // 获取实例的会话列表
@@ -1294,7 +3452,7 @@ app.post('/api/instances/:id/sessions', (req, res) => {
   }
   
   const filePath = path.join(instanceChatDir, `${sessionId}.json`)
-  fs.writeFileSync(filePath, JSON.stringify(sessionData, null, 2))
+  saveSessionJson(filePath, sessionData)
   
   res.json(sessionData)
 })
@@ -1310,6 +3468,67 @@ app.get('/api/instances/:instanceId/sessions/:sessionId', (req, res) => {
   
   const data = JSON.parse(fs.readFileSync(filePath, 'utf8'))
   res.json(data)
+})
+
+// 追加会话事件（用于本地工具调用、快捷命令等非 LLM 消息）
+app.post('/api/instances/:instanceId/sessions/:sessionId/events', (req, res) => {
+  const { instanceId, sessionId } = req.params
+  const { messages = [], model, title } = req.body || {}
+
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: 'messages 不能为空' })
+  }
+
+  const instance = instances.find(i => i.id === instanceId)
+  if (!instance) {
+    return res.status(404).json({ error: '实例不存在' })
+  }
+
+  const filePath = path.join(CHAT_DIR, instanceId, `${sessionId}.json`)
+  let sessionData
+
+  if (fs.existsSync(filePath)) {
+    sessionData = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  } else {
+    sessionData = {
+      id: sessionId,
+      instanceId,
+      title: title || '新会话',
+      model: model || 'tool',
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      isFavorite: false
+    }
+  }
+
+  const normalizedMessages = messages.map((item, index) => ({
+    id: String(item?.id || `${Date.now()}-${index}`),
+    role: item?.role === 'assistant' ? 'assistant' : 'user',
+    content: String(item?.content || ''),
+    timestamp: item?.timestamp || new Date().toISOString(),
+    model: item?.model ? String(item.model) : undefined
+  })).filter(item => item.content.trim())
+
+  if (normalizedMessages.length === 0) {
+    return res.status(400).json({ error: '没有可保存的消息内容' })
+  }
+
+  sessionData.messages = [...(sessionData.messages || []), ...normalizedMessages]
+  sessionData.updatedAt = new Date().toISOString()
+  if (model) sessionData.model = model
+
+  const firstUserMessage = normalizedMessages.find(item => item.role === 'user')
+  if ((!sessionData.title || sessionData.title === '新会话') && firstUserMessage) {
+    sessionData.title = firstUserMessage.content.slice(0, 20) + (firstUserMessage.content.length > 20 ? '...' : '')
+  }
+
+  try {
+    const savedSession = saveSessionJson(filePath, sessionData, { archive: true })
+    res.json(savedSession.sessionData)
+  } catch (error) {
+    res.status(500).json({ error: '保存会话事件失败', message: error.message })
+  }
 })
 
 // 发送消息（调用实例的 AI）
@@ -1480,7 +3699,8 @@ app.post('/api/instances/:instanceId/sessions/:sessionId/chat', async (req, res)
     sessionData.title = message.substring(0, 20) + (message.length > 20 ? '...' : '')
   }
   
-  fs.writeFileSync(filePath, JSON.stringify(sessionData, null, 2))
+  const savedSession = saveSessionJson(filePath, sessionData, { archive: true })
+  sessionData = savedSession.sessionData
   
   res.json({
     reply,
@@ -1495,7 +3715,8 @@ app.post('/api/instances/:instanceId/sessions/:sessionId/chat', async (req, res)
     usage: {
       totalMessages: sessionData.messages.length
     },
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    obsidianArchive: savedSession.archiveResult
   })
 })
 
@@ -1629,8 +3850,8 @@ app.post('/api/instances/:id/skills/:skillName/execute', async (req, res) => {
   }
   
   // 只有本地实例才能执行技能
-  if (instance.type !== 'local' && instance.type !== 'stepfun-desktop') {
-    return res.status(403).json({ error: '只有本地实例可以执行技能' })
+  if (instance.type !== 'local' && instance.type !== 'agent-desktop' && instance.type !== 'stepfun-desktop') {
+    return res.status(403).json({ error: '只有本地运行时或 Agent 桌面端可以执行技能' })
   }
   
   try {
@@ -1673,30 +3894,225 @@ app.post('/api/instances/:id/apps/:appName/open', async (req, res) => {
     return res.status(404).json({ error: '实例不存在' })
   }
   
-  const commands = {
-    'feishu': 'open -a "Lark" || open -a "飞书"',
-    'wechat': 'open -a "WeChat" || open -a "微信"',
-    'chrome': 'open -a "Google Chrome"',
-    'safari': 'open -a "Safari"',
-    'terminal': 'open -a "Terminal"',
-    'finder': 'open -a "Finder"',
-    'vscode': 'open -a "Visual Studio Code"'
+  const appAliases = {
+    feishu: ['Lark', '飞书'],
+    lark: ['Lark', '飞书'],
+    wechat: ['WeChat', '微信'],
+    chrome: ['Google Chrome'],
+    safari: ['Safari'],
+    terminal: ['Terminal'],
+    finder: ['Finder'],
+    vscode: ['Visual Studio Code'],
+    parazta: ['ParaZTA'],
+    workbuddy: ['WorkBuddy'],
+    marvis: ['Marvis'],
+    codex: ['Codex'],
+    chatgpt: ['ChatGPT'],
+    claude: ['Claude'],
+    cursor: ['Cursor']
   }
-  
-  const command = commands[appName] || `open -a "${appName}"`
-  
-  try {
-    const { exec } = await import('child_process')
-    
-    exec(command, (error) => {
+
+  const normalizedAppName = String(appName || '')
+    .trim()
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+    .replace(/\.app$/i, '')
+    .replace(/\s*(应用|app|软件|程序)$/i, '')
+    .trim()
+
+  if (!normalizedAppName || normalizedAppName.length > 120 || /[\u0000\r\n]/.test(normalizedAppName)) {
+    return res.status(400).json({ success: false, error: '应用名称不合法' })
+  }
+
+  const candidates = appAliases[normalizedAppName.toLowerCase()] || appAliases[normalizedAppName] || [normalizedAppName]
+  const errors = []
+
+  const tryOpenApp = (candidate) => new Promise((resolve) => {
+    const appPath = findInstalledMacAppPath(candidate)
+    const args = appPath ? [appPath] : ['-a', candidate]
+    execFile('open', args, { timeout: 10000 }, (error) => {
       if (error) {
-        res.status(500).json({ success: false, error: error.message })
+        errors.push(`${candidate}: ${error.message}`)
+        resolve({ ok: false, candidate, appPath })
       } else {
-        res.json({ success: true, app: appName })
+        resolve({ ok: true, candidate, appPath })
       }
     })
+  })
+
+  const isAppRunning = (candidate) => new Promise((resolve) => {
+    execFile('pgrep', ['-if', candidate], { timeout: 5000 }, (error, stdout) => {
+      resolve(!error && Boolean(String(stdout || '').trim()))
+    })
+  })
+
+  const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+  try {
+    for (const candidate of candidates) {
+      const result = await tryOpenApp(candidate)
+      if (result.ok) {
+        await wait(1500)
+        const running = await isAppRunning(candidate)
+        if (running) {
+          return res.json({
+            success: true,
+            verified: true,
+            app: normalizedAppName,
+            openedAs: result.candidate,
+            path: result.appPath || null
+          })
+        }
+        return res.json({
+          success: false,
+          opened: true,
+          verified: false,
+          app: normalizedAppName,
+          openedAs: result.candidate,
+          path: result.appPath || null,
+          error: `打开请求已发送，但没有检测到 ${result.candidate} 进程。应用可能启动后立即退出、被系统权限拦截，或作为后台/菜单栏应用运行。`,
+          details: errors.slice(-3)
+        })
+      }
+    }
+    res.status(404).json({
+      success: false,
+      app: normalizedAppName,
+      error: `没有找到可打开的应用：${normalizedAppName}。请确认应用已安装，且名称与 /Applications 中显示一致。`,
+      details: errors.slice(-3)
+    })
   } catch (error) {
-    res.status(500).json({ error: '打开失败', message: error.message })
+    res.status(500).json({ success: false, error: '打开失败', message: error.message })
+  }
+})
+
+app.post('/api/instances/:id/agent-desktop/invoke', async (req, res) => {
+  const { id } = req.params
+  const instance = instances.find(i => i.id === id)
+  if (!instance) return res.status(404).json({ error: '实例不存在' })
+  if (instance.type !== 'agent-desktop' && instance.type !== 'stepfun-desktop') {
+    return res.status(400).json({ success: false, error: '该实例不是 Agent 桌面端' })
+  }
+
+  const instruction = String(req.body?.instruction || '').trim()
+  const appName = String(instance.appName || instance.name || '').trim()
+  const configuredPath = instance.configPath ? String(instance.configPath).replace('~', os.homedir()) : ''
+  const appPath = configuredPath.endsWith('.app') && fs.existsSync(configuredPath)
+    ? configuredPath
+    : findInstalledMacAppPath(appName)
+
+  if (!appPath) {
+    return res.status(404).json({
+      success: false,
+      error: `未找到桌面 Agent 应用：${appName}`,
+      appName
+    })
+  }
+
+  try {
+    const invocationMode = normalizeInvocationMode(instance)
+    const invocation = {
+      id: `agent-invocation-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      instanceId: instance.id,
+      instanceName: instance.name,
+      appName,
+      appPath,
+      instruction,
+      invocationMode,
+      source: req.body?.source || 'chat',
+      createdAt: new Date().toISOString()
+    }
+    fs.appendFileSync(AGENT_DESKTOP_INVOCATIONS_FILE, JSON.stringify(invocation) + '\n')
+
+    if (invocationMode === 'cli') {
+      const cliCommand = String(instance.cliCommand || '').trim()
+      const resolvedCli = cliCommand.includes('/') ? cliCommand.replace('~', os.homedir()) : findExecutableOnPath(cliCommand)
+      if (!resolvedCli || !fs.existsSync(resolvedCli)) {
+        return res.status(400).json({
+          success: false,
+          error: `未找到 CLI：${cliCommand || '未配置'}`,
+          invocation
+        })
+      }
+      const args = parseCliArgsTemplate(instance.cliArgsTemplate || '{{instruction}}', instruction, {
+        appName,
+        instanceId: instance.id
+      })
+      return execFile(resolvedCli, args, { timeout: 30000 }, (error, stdout, stderr) => {
+        if (error) {
+          return res.status(500).json({
+            success: false,
+            error: 'CLI 投递失败',
+            message: error.message,
+            stderr: String(stderr || '').slice(0, 4000),
+            invocation: { ...invocation, cliCommand: resolvedCli, cliArgs: args }
+          })
+        }
+        res.json({
+          success: true,
+          mode: 'cli',
+          message: `已通过 CLI 投递给 ${appName}`,
+          appName,
+          appPath,
+          cliCommand: resolvedCli,
+          cliArgs: args,
+          stdout: String(stdout || '').slice(0, 4000),
+          stderr: String(stderr || '').slice(0, 4000),
+          invocation
+        })
+      })
+    }
+
+    if (invocationMode === 'url-scheme') {
+      const url = renderInvocationTemplate(
+        instance.urlTemplate || (instance.urlScheme ? `${instance.urlScheme}://?prompt={{encodedInstruction}}` : ''),
+        instruction,
+        { appName, instanceId: instance.id }
+      )
+      if (!url || !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+        return res.status(400).json({
+          success: false,
+          error: 'URL Scheme 模板不合法',
+          invocation
+        })
+      }
+      return execFile('open', [url], { timeout: 10000 }, (error) => {
+        if (error) {
+          return res.status(500).json({
+            success: false,
+            error: 'URL Scheme 投递失败',
+            message: error.message,
+            invocation: { ...invocation, url }
+          })
+        }
+        res.json({
+          success: true,
+          mode: 'url-scheme',
+          message: `已通过 URL Scheme 投递给 ${appName}`,
+          appName,
+          appPath,
+          url,
+          invocation
+        })
+      })
+    }
+
+    execFile('open', [appPath], { timeout: 10000 }, (error) => {
+      if (error) {
+        return res.status(500).json({ success: false, error: '打开桌面 Agent 失败', message: error.message, invocation })
+      }
+      res.json({
+        success: true,
+        mode: 'open',
+        message: instruction
+          ? `已打开 ${appName}，并记录本次调用意图。`
+          : `已打开 ${appName}`,
+        appName,
+        appPath,
+        invocation
+      })
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, error: '调用桌面 Agent 失败', message: error.message })
   }
 })
 
@@ -2051,8 +4467,8 @@ app.patch('/api/instances/:instanceId/sessions/:sessionId', (req, res) => {
   try {
     const data = JSON.parse(fs.readFileSync(filePath, 'utf8'))
     const updated = { ...data, ...req.body, updatedAt: new Date().toISOString() }
-    fs.writeFileSync(filePath, JSON.stringify(updated, null, 2))
-    res.json(updated)
+    const saved = saveSessionJson(filePath, updated, { archive: true })
+    res.json(saved.sessionData)
   } catch (error) {
     res.status(500).json({ error: '更新会话失败', message: error.message })
   }
@@ -2181,6 +4597,96 @@ app.get('/api/memory/search', (req, res) => {
   res.json({ memories: filtered, total: Object.keys(filtered).length })
 })
 
+app.get('/api/memory/sync-to-obsidian', (req, res) => {
+  try {
+    const data = loadMemory()
+    const memories = data.memories || {}
+    const items = Object.entries(memories).map(([key, entry]) => ({
+      key,
+      value: entry.value,
+      agent: entry.agent || '',
+      timestamp: entry.timestamp || '',
+      syncedToObsidian: entry.syncedToObsidian || null
+    })).sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')) || a.key.localeCompare(b.key, 'zh-Hans-CN'))
+    res.json({
+      memories: items,
+      total: items.length,
+      unsynced: items.filter(item => !item.syncedToObsidian?.relativePath).length
+    })
+  } catch (error) {
+    res.status(500).json({ error: '读取记忆同步状态失败', message: error.message })
+  }
+})
+
+app.post('/api/memory/sync-to-obsidian', (req, res) => {
+  try {
+    const { keys = [], includeSynced = false } = req.body || {}
+    res.json(syncMemoriesToObsidian({ keys, includeSynced }))
+  } catch (error) {
+    res.status(500).json({ error: '同步记忆到知识库失败', message: error.message })
+  }
+})
+
+app.post('/api/conversations/archive-to-obsidian', (req, res) => {
+  try {
+    const { instanceId = '', includeEmpty = false } = req.body || {}
+    const archived = []
+    const skipped = []
+    const failed = []
+
+    if (!fs.existsSync(CHAT_DIR)) {
+      return res.json({ success: true, archived, skipped, failed, index: null })
+    }
+
+    const instanceDirs = fs.readdirSync(CHAT_DIR, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .filter(entry => !instanceId || entry.name === instanceId)
+
+    for (const dir of instanceDirs) {
+      const instanceChatDir = path.join(CHAT_DIR, dir.name)
+      const files = fs.readdirSync(instanceChatDir).filter(file => file.endsWith('.json'))
+      for (const file of files) {
+        const filePath = path.join(instanceChatDir, file)
+        try {
+          const sessionData = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+          const messages = Array.isArray(sessionData.messages) ? sessionData.messages : []
+          if (!includeEmpty && messages.length === 0) {
+            skipped.push({ id: sessionData.id || file.replace('.json', ''), reason: '空会话' })
+            continue
+          }
+          const saved = saveSessionJson(filePath, sessionData, { archive: true, updateIndex: false })
+          if (saved.archiveResult?.ok) {
+            archived.push({
+              id: saved.sessionData.id,
+              title: saved.sessionData.title,
+              relativePath: saved.archiveResult.relativePath
+            })
+          } else {
+            skipped.push({
+              id: sessionData.id || file.replace('.json', ''),
+              reason: saved.archiveResult?.reason || saved.archiveResult?.error || '未归档'
+            })
+          }
+        } catch (error) {
+          failed.push({ file: `${dir.name}/${file}`, error: error.message })
+        }
+      }
+    }
+
+    let index = null
+    try {
+      const vault = getMarkdownVaultConfig()
+      if (vault.ok) index = updateConversationArchiveIndex(vault.config)
+    } catch (error) {
+      failed.push({ file: 'Codex/对话存档/会话索引.md', error: error.message })
+    }
+
+    res.json({ success: failed.length === 0, archived, skipped, failed, index })
+  } catch (error) {
+    res.status(500).json({ error: '归档会话到知识库失败', message: error.message })
+  }
+})
+
 app.post('/api/memory', (req, res) => {
   const { key, value, agent } = req.body
   if (!key || value === undefined) return res.status(400).json({ error: 'key 和 value 为必填' })
@@ -2238,6 +4744,761 @@ app.post('/api/obsidian/memory', (req, res) => {
     res.json({ success: true, note })
   } catch (error) {
     res.status(500).json({ error: '写入 Obsidian 记忆失败', message: error.message })
+  }
+})
+
+// ==================== 文档工作台 API ====================
+
+app.get('/api/documents/status', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    let contract = null
+    let contractError = ''
+    if (vault.ok) {
+      try {
+        contract = ensureLingshuVaultContract(vault.config)
+      } catch (error) {
+        contractError = error.message
+      }
+    }
+    const noteCount = vault.ok ? listObsidianMarkdownFiles(vault.config, 5000).length : 0
+    res.json({
+      valid: vault.ok,
+      reason: vault.reason || '',
+      vaultPath: vault.config?.vaultPath || '',
+      noteCount,
+      includeFolders: vault.config?.includeFolders || [],
+      excludeFolders: vault.config?.excludeFolders || [],
+      contract,
+      contractError
+    })
+  } catch (error) {
+    res.status(500).json({ error: '检查文档工作台失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/tree', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    res.json({ tree: buildDocumentTree(vault.config) })
+  } catch (error) {
+    res.status(500).json({ error: '读取文档树失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/search', (req, res) => {
+  try {
+    const q = String(req.query.q || '')
+    const limit = Number(req.query.limit) || 20
+    res.json(searchMarkdownDocuments(q, limit))
+  } catch (error) {
+    res.status(500).json({ error: '搜索文档失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/properties', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const tags = String(req.query.tags || '')
+    const status = String(req.query.status || '')
+    const q = String(req.query.q || '')
+    const limit = Number(req.query.limit) || 200
+    res.json(listDocumentProperties(vault.config, { tags, status, query: q, maxResults: limit }))
+  } catch (error) {
+    res.status(500).json({ error: '读取文档属性失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/link-candidates', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const q = String(req.query.q || '')
+    const limit = Number(req.query.limit) || 500
+    res.json(listDocumentLinkCandidates(vault.config, q, limit))
+  } catch (error) {
+    res.status(500).json({ error: '读取文档链接候选失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/backlinks', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const limit = Number(req.query.limit) || 30
+    res.json(buildDocumentBacklinks(req.query.path, vault.config, limit))
+  } catch (error) {
+    res.status(500).json({ error: '读取文档反链失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/graph', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const limit = Number(req.query.limit) || 60
+    const depth = Number(req.query.depth) || 1
+    res.json(buildDocumentGraph(req.query.path, vault.config, limit, depth))
+  } catch (error) {
+    res.status(500).json({ error: '读取文档图谱失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/workbench', (req, res) => {
+  try {
+    res.json(loadDocumentWorkbenchState())
+  } catch (error) {
+    res.status(500).json({ error: '读取文档工作台状态失败', message: error.message })
+  }
+})
+
+app.post('/api/documents/recent', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const entry = normalizeDocumentWorkbenchEntry(req.body || {}, vault.config)
+    const state = loadDocumentWorkbenchState()
+    state.recent = [entry, ...state.recent.filter(item => item.path !== entry.path)].slice(0, 30)
+    saveDocumentWorkbenchState(state)
+    res.json(state)
+  } catch (error) {
+    res.status(400).json({ error: '记录最近打开失败', message: error.message })
+  }
+})
+
+app.post('/api/documents/favorites', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const entry = normalizeDocumentWorkbenchEntry(req.body || {}, vault.config)
+    const state = loadDocumentWorkbenchState()
+    if (!state.favorites.some(item => item.path === entry.path)) {
+      state.favorites = [{ ...entry, addedAt: new Date().toISOString() }, ...state.favorites].slice(0, 80)
+    }
+    saveDocumentWorkbenchState(state)
+    res.json(state)
+  } catch (error) {
+    res.status(400).json({ error: '收藏文档失败', message: error.message })
+  }
+})
+
+app.delete('/api/documents/favorites', (req, res) => {
+  try {
+    const targetPath = normalizeVaultRelativePath(req.query.path)
+    const state = loadDocumentWorkbenchState()
+    state.favorites = state.favorites.filter(item => item.path !== targetPath)
+    saveDocumentWorkbenchState(state)
+    res.json(state)
+  } catch (error) {
+    res.status(400).json({ error: '取消收藏失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/file', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const { relativePath, absolutePath } = resolveVaultPath(req.query.path, vault.config, { requireMarkdown: true })
+    if (!fs.existsSync(absolutePath)) return res.status(404).json({ error: '文档不存在' })
+    const stat = fs.statSync(absolutePath)
+    if (!stat.isFile()) return res.status(400).json({ error: '不是文件' })
+    if (stat.size > 1024 * 1024) return res.status(413).json({ error: '文档超过 1MB，暂不在工作台内编辑' })
+    const content = fs.readFileSync(absolutePath, 'utf8')
+    res.json({
+      path: relativePath,
+      title: path.basename(relativePath, '.md'),
+      content,
+      revision: hashContent(content),
+      mtime: stat.mtime.toISOString(),
+      size: stat.size
+    })
+  } catch (error) {
+    res.status(400).json({ error: '读取文档失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/file-status', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    ensureDocumentWatcher(vault.config)
+    ensureDocumentFileWatcher(vault.config, req.query.path)
+    res.json(getDocumentFileStatus(req.query.path, vault.config))
+  } catch (error) {
+    res.status(400).json({ error: '读取文档状态失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/watch', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const watcher = ensureDocumentWatcher(vault.config)
+    res.json(watcher)
+  } catch (error) {
+    res.status(500).json({ error: '启动文档监听失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/events', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const watcher = ensureDocumentWatcher(vault.config)
+    const since = Math.max(Number(req.query.since) || 0, 0)
+    const requestedPath = req.query.path ? normalizeVaultRelativePath(req.query.path) : ''
+    if (requestedPath) ensureDocumentFileWatcher(vault.config, requestedPath)
+    const events = documentWatchState.events
+      .filter(event => event.id > since)
+      .filter(event => !requestedPath || event.path === requestedPath)
+    res.json({ ...watcher, events, lastEventId: documentWatchState.lastId })
+  } catch (error) {
+    res.status(400).json({ error: '读取文档事件失败', message: error.message })
+  }
+})
+
+app.put('/api/documents/file', (req, res) => {
+  try {
+    const { path: requestedPath, content, baseRevision, force } = req.body || {}
+    if (typeof content !== 'string') return res.status(400).json({ error: 'content 为必填' })
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const { relativePath, absolutePath } = resolveVaultPath(requestedPath, vault.config, { requireMarkdown: true })
+    const exists = fs.existsSync(absolutePath)
+    if (exists && !fs.statSync(absolutePath).isFile()) return res.status(400).json({ error: '不是文件' })
+
+    const currentRevision = exists ? fileRevision(absolutePath) : ''
+    if (!force && baseRevision !== undefined && currentRevision && baseRevision !== currentRevision) {
+      return res.status(409).json({ error: '文档已在外部发生变化', currentRevision })
+    }
+
+    if (exists) {
+      const snapshot = documentSnapshotPath(relativePath)
+      fs.mkdirSync(path.dirname(snapshot), { recursive: true })
+      fs.copyFileSync(absolutePath, snapshot)
+    } else {
+      fs.mkdirSync(path.dirname(absolutePath), { recursive: true })
+    }
+
+    atomicWriteTextFile(absolutePath, content)
+    const stat = fs.statSync(absolutePath)
+    res.json({
+      success: true,
+      path: relativePath,
+      revision: hashContent(content),
+      mtime: stat.mtime.toISOString(),
+      size: stat.size
+    })
+  } catch (error) {
+    res.status(400).json({ error: '保存文档失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/versions', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const { relativePath } = resolveVaultPath(req.query.path, vault.config, { requireMarkdown: true })
+    const snapshotDir = documentSnapshotDirectory(relativePath)
+    if (!fs.existsSync(snapshotDir)) return res.json({ versions: [] })
+
+    const versions = fs.readdirSync(snapshotDir, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /^\d{4}-\d{2}-\d{2}T[\d-]+Z\.md$/.test(entry.name))
+      .map(entry => {
+        const filePath = path.join(snapshotDir, entry.name)
+        const stat = fs.statSync(filePath)
+        return {
+          id: entry.name,
+          createdAt: entry.name.replace(/\.md$/, '').replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, 'T$1:$2:$3.$4Z'),
+          size: stat.size,
+          revision: fileRevision(filePath)
+        }
+      })
+      .sort((a, b) => String(b.id).localeCompare(String(a.id)))
+      .slice(0, 80)
+
+    res.json({ versions })
+  } catch (error) {
+    res.status(400).json({ error: '读取版本历史失败', message: error.message })
+  }
+})
+
+app.get('/api/documents/versions/content', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const { relativePath } = resolveVaultPath(req.query.path, vault.config, { requireMarkdown: true })
+    const snapshotPath = resolveDocumentSnapshot(relativePath, req.query.version)
+    if (!fs.existsSync(snapshotPath)) return res.status(404).json({ error: '版本不存在' })
+    const content = fs.readFileSync(snapshotPath, 'utf8')
+    const stat = fs.statSync(snapshotPath)
+    res.json({
+      path: relativePath,
+      version: path.basename(snapshotPath),
+      content,
+      revision: hashContent(content),
+      size: stat.size,
+      createdAt: path.basename(snapshotPath).replace(/\.md$/, '').replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, 'T$1:$2:$3.$4Z')
+    })
+  } catch (error) {
+    res.status(400).json({ error: '读取版本内容失败', message: error.message })
+  }
+})
+
+app.post('/api/documents/versions/restore', (req, res) => {
+  try {
+    const { path: requestedPath, version, baseRevision, force } = req.body || {}
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const { relativePath, absolutePath } = resolveVaultPath(requestedPath, vault.config, { requireMarkdown: true })
+    const snapshotPath = resolveDocumentSnapshot(relativePath, version)
+    if (!fs.existsSync(snapshotPath)) return res.status(404).json({ error: '版本不存在' })
+    if (!fs.existsSync(absolutePath)) return res.status(404).json({ error: '当前文档不存在' })
+
+    const currentRevision = fileRevision(absolutePath)
+    if (!force && baseRevision !== undefined && currentRevision && baseRevision !== currentRevision) {
+      return res.status(409).json({ error: '文档已在外部发生变化', currentRevision })
+    }
+
+    const backupPath = documentSnapshotPath(relativePath)
+    fs.mkdirSync(path.dirname(backupPath), { recursive: true })
+    fs.copyFileSync(absolutePath, backupPath)
+    const content = fs.readFileSync(snapshotPath, 'utf8')
+    atomicWriteTextFile(absolutePath, content)
+    const stat = fs.statSync(absolutePath)
+    res.json({
+      success: true,
+      path: relativePath,
+      revision: hashContent(content),
+      mtime: stat.mtime.toISOString(),
+      size: stat.size
+    })
+  } catch (error) {
+    res.status(400).json({ error: '恢复版本失败', message: error.message })
+  }
+})
+
+app.post('/api/documents/export', (req, res) => {
+  try {
+    const { path: requestedPath, content, format = 'html' } = req.body || {}
+    const exportFormat = format === 'markdown' || format === 'md' ? 'markdown' : 'html'
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const { relativePath, absolutePath } = resolveVaultPath(requestedPath, vault.config, { requireMarkdown: true })
+    if (!fs.existsSync(absolutePath) && typeof content !== 'string') return res.status(404).json({ error: '文档不存在' })
+
+    const sourceContent = typeof content === 'string' ? content : fs.readFileSync(absolutePath, 'utf8')
+    const title = (sourceContent.match(/^#\s+(.+)$/m)?.[1] || path.basename(relativePath, '.md')).trim()
+    const fileName = buildExportFileName(relativePath, exportFormat)
+    const exportPath = path.join(EXPORTS_DIR, fileName)
+    if (!isPathInside(EXPORTS_DIR, exportPath)) throw new Error('非法导出路径')
+
+    if (exportFormat === 'markdown') {
+      fs.writeFileSync(exportPath, sourceContent)
+    } else {
+      fs.writeFileSync(exportPath, buildExportHtml({ title, markdown: sourceContent, sourcePath: relativePath }))
+    }
+
+    res.json({
+      success: true,
+      format: exportFormat,
+      title,
+      fileName,
+      path: exportPath,
+      url: `/exports/${encodeURIComponent(fileName)}`,
+      createdAt: new Date().toISOString()
+    })
+  } catch (error) {
+    res.status(400).json({ error: '导出文档失败', message: error.message })
+  }
+})
+
+app.post('/api/documents/create', (req, res) => {
+  try {
+    const { parentPath = '', title = '未命名文档', content = '' } = req.body || {}
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const parent = resolveVaultPath(parentPath, vault.config, { allowDirectory: true })
+    const parentStat = fs.existsSync(parent.absolutePath) ? fs.statSync(parent.absolutePath) : null
+    const targetDir = parentStat?.isFile() ? path.dirname(parent.absolutePath) : parent.absolutePath
+    if (!isPathInside(vault.config.vaultPath, targetDir)) throw new Error('非法目录')
+    fs.mkdirSync(targetDir, { recursive: true })
+
+    const baseName = safeDocumentTitle(title)
+    let filePath = path.join(targetDir, `${baseName}.md`)
+    let suffix = 2
+    while (fs.existsSync(filePath)) {
+      filePath = path.join(targetDir, `${baseName}-${suffix}.md`)
+      suffix++
+    }
+    atomicWriteTextFile(filePath, content || `# ${baseName}\n`)
+    const relativePath = path.relative(vault.config.vaultPath, filePath).split(path.sep).join('/')
+    res.json({ success: true, path: relativePath })
+  } catch (error) {
+    res.status(400).json({ error: '创建文档失败', message: error.message })
+  }
+})
+
+app.post('/api/documents/agent/edit', async (req, res) => {
+  try {
+    const {
+      agentId = 'document-agent',
+      documentPath = '',
+      baseRevision = '',
+      documentContent,
+      content = '',
+      selection,
+      instruction = '',
+      action = 'rewrite',
+      contextPolicy = 'document-only',
+      model
+    } = req.body || {}
+    const sourceContent = typeof documentContent === 'string' ? documentContent : content
+    if (!String(sourceContent).trim()) return res.status(400).json({ error: 'documentContent/content 为必填' })
+    if (!String(instruction).trim() && action === 'custom') return res.status(400).json({ error: 'instruction 为必填' })
+
+    let normalizedDocumentPath = ''
+    let currentRevision = ''
+    if (documentPath) {
+      const vault = getMarkdownVaultConfig()
+      if (!vault.ok) return res.status(400).json({ error: vault.reason })
+      const resolved = resolveVaultPath(documentPath, vault.config, { requireMarkdown: true })
+      normalizedDocumentPath = resolved.relativePath
+      currentRevision = fs.existsSync(resolved.absolutePath) ? fileRevision(resolved.absolutePath) : ''
+      if (baseRevision && currentRevision && baseRevision !== currentRevision) {
+        return res.status(409).json({ error: '文档已在外部发生变化', currentRevision })
+      }
+    }
+
+    const selectionText = typeof selection === 'string'
+      ? selection
+      : typeof selection?.text === 'string'
+        ? selection.text
+        : ''
+    const normalizedContextPolicy = ['document-only', 'vault', 'full-tools'].includes(contextPolicy) ? contextPolicy : 'document-only'
+    const actionLabel = {
+      rewrite: '改写并优化表达',
+      summarize: '生成结构化摘要',
+      expand: '扩写当前内容',
+      polish: '润色为清晰专业的中文',
+      translate: '翻译当前内容',
+      review: '审阅当前内容并提出可直接应用的改进稿',
+      custom: instruction
+    }[action] || instruction || '优化文档'
+
+    const targetText = selectionText || sourceContent
+    const citations = []
+    let vaultContext = ''
+    if (normalizedContextPolicy !== 'document-only') {
+      try {
+        const query = [instruction, actionLabel, selectionText || normalizedDocumentPath].filter(Boolean).join(' ')
+        const search = searchMarkdownDocuments(query || targetText.slice(0, 120), 5)
+        if (search.ok && Array.isArray(search.results) && search.results.length > 0) {
+          citations.push(...search.results.map(item => ({
+            title: item.title,
+            path: item.path || item.relativePath,
+            snippet: item.snippet || ''
+          })))
+          vaultContext = [
+            '## Vault 相关上下文',
+            ...search.results.map((item, index) => [
+              `### ${index + 1}. ${item.title}`,
+              `路径：${item.path || item.relativePath}`,
+              item.snippet || ''
+            ].join('\n'))
+          ].join('\n\n')
+        }
+      } catch (_) {}
+    }
+
+    const messages = [
+      {
+        role: 'system',
+        content: [
+          '你是灵枢内部文档 Agent。只输出可直接替换的 Markdown 正文，不要使用代码围栏，不要解释操作过程。',
+          '保留用户原文中的事实、链接、表格和任务项。默认只生成建议稿，不直接覆盖文档。',
+          normalizedContextPolicy === 'document-only' ? '上下文策略：仅使用当前选区或当前文档。' : '',
+          normalizedContextPolicy === 'vault' ? '上下文策略：可以参考当前 Vault 中的相关 Markdown 笔记，但不要编造引用。' : '',
+          normalizedContextPolicy === 'full-tools' ? '上下文策略：可以参考当前 Vault 和灵枢 Skills 语义，但本接口仍只返回文档修改建议。' : ''
+        ].filter(Boolean).join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          `Agent：${agentId}`,
+          normalizedDocumentPath ? `文档路径：${normalizedDocumentPath}` : '',
+          baseRevision ? `基础版本：${baseRevision}` : '',
+          `上下文策略：${normalizedContextPolicy}`,
+          `任务：${actionLabel}`,
+          instruction ? `补充要求：${instruction}` : '',
+          selectionText ? `范围：仅处理选区文本${typeof selection?.from === 'number' && typeof selection?.to === 'number' ? `（${selection.from}-${selection.to}）` : ''}。` : '范围：处理整篇文档。',
+          vaultContext,
+          '',
+          '当前 Markdown：',
+          targetText
+        ].filter(Boolean).join('\n')
+      }
+    ]
+    const result = await callInternalAgent({ modelKey: model, messages, temperature: 0.35 })
+    res.json({
+      success: true,
+      baseRevision: baseRevision || currentRevision || '',
+      documentPath: normalizedDocumentPath,
+      proposedContent: result.text.trim(),
+      proposal: result.text.trim(),
+      replaceSelection: !!selectionText,
+      citations,
+      model: result.model,
+      summary: actionLabel,
+      contextPolicy: normalizedContextPolicy
+    })
+  } catch (error) {
+    res.status(500).json({ error: '文档 Agent 调用失败', message: error.message })
+  }
+})
+
+// ==================== 转写设置 API ====================
+
+app.get('/api/transcription/settings', (req, res) => {
+  try {
+    const config = getTranscriptionConfig()
+    res.json({ ...config, apiKey: config.apiKey ? '********' : '' })
+  } catch (error) {
+    res.status(500).json({ error: '读取转写设置失败', message: error.message })
+  }
+})
+
+app.put('/api/transcription/settings', (req, res) => {
+  try {
+    const current = loadSettings()
+    const incoming = req.body || {}
+    const existingApiKey = current.transcription?.apiKey || ''
+    const apiKey = incoming.apiKey === '********' ? existingApiKey : String(incoming.apiKey || '')
+    const transcription = {
+      ...DEFAULT_TRANSCRIPTION_SETTINGS,
+      ...(current.transcription || {}),
+      enabled: !!incoming.enabled,
+      provider: incoming.provider === 'openai-compatible' ? 'openai-compatible' : 'browser',
+      baseUrl: String(incoming.baseUrl || '').trim(),
+      apiKey,
+      model: String(incoming.model || 'whisper-1').trim(),
+      language: String(incoming.language || 'zh').trim()
+    }
+    const updated = { ...current, transcription, updatedAt: new Date().toISOString() }
+    saveSettings(updated)
+    res.json({ ...transcription, apiKey: transcription.apiKey ? '********' : '' })
+  } catch (error) {
+    res.status(500).json({ error: '保存转写设置失败', message: error.message })
+  }
+})
+
+// ==================== 会议录音与纪要 API ====================
+
+app.get('/api/meetings', (req, res) => {
+  try {
+    res.json({ meetings: listMeetings() })
+  } catch (error) {
+    res.status(500).json({ error: '读取历史会议失败', message: error.message })
+  }
+})
+
+app.get('/api/meetings/:id', (req, res) => {
+  try {
+    const meeting = loadMeeting(req.params.id)
+    if (!meeting) return res.status(404).json({ error: '会议不存在' })
+    res.json({
+      ...meetingSummary(meeting),
+      transcript: readTextFileIfExists(meeting.transcriptPath),
+      minutes: readTextFileIfExists(meeting.minutesPath)
+    })
+  } catch (error) {
+    res.status(500).json({ error: '读取会议失败', message: error.message })
+  }
+})
+
+app.post('/api/meetings', (req, res) => {
+  try {
+    const title = safeDocumentTitle(req.body?.title || `会议 ${new Date().toLocaleString('zh-CN')}`)
+    const id = `meeting-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+    const meeting = {
+      id,
+      title,
+      status: 'ready',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      audioPath: '',
+      transcriptPath: '',
+      minutesPath: '',
+      vaultRelativePath: ''
+    }
+    saveMeeting(meeting)
+    res.json(meeting)
+  } catch (error) {
+    res.status(500).json({ error: '创建会议失败', message: error.message })
+  }
+})
+
+function getAudioUploadExtension(file, mimeType) {
+  const originalExt = path.extname(file?.originalname || '').replace(/^\./, '').toLowerCase()
+  const allowed = new Set(['mp3', 'm4a', 'wav', 'webm', 'mp4', 'aac', 'flac', 'ogg', 'opus'])
+  if (allowed.has(originalExt)) return originalExt
+  const mime = String(mimeType || file?.mimetype || '').toLowerCase()
+  if (mime.includes('mpeg') || mime.includes('mp3')) return 'mp3'
+  if (mime.includes('mp4') || mime.includes('m4a')) return 'm4a'
+  if (mime.includes('wav')) return 'wav'
+  if (mime.includes('flac')) return 'flac'
+  if (mime.includes('ogg')) return 'ogg'
+  if (mime.includes('aac')) return 'aac'
+  if (mime.includes('webm')) return 'webm'
+  return 'webm'
+}
+
+app.post('/api/meetings/:id/audio', upload.single('audio'), (req, res) => {
+  try {
+    const meeting = loadMeeting(req.params.id)
+    if (!meeting) return res.status(404).json({ error: '会议不存在' })
+    if (!req.file) return res.status(400).json({ error: '缺少录音文件' })
+
+    const meetingDir = path.join(MEETINGS_DIR, meeting.id)
+    fs.mkdirSync(meetingDir, { recursive: true })
+    const mime = String(req.body?.mimeType || req.file.mimetype || '')
+    const ext = getAudioUploadExtension(req.file, mime)
+    const audioPath = path.join(meetingDir, `audio.${ext}`)
+    fs.renameSync(req.file.path, audioPath)
+
+    const transcript = String(req.body?.transcript || '').trim()
+    let transcriptPath = meeting.transcriptPath || ''
+    if (transcript) {
+      transcriptPath = path.join(meetingDir, 'transcript.md')
+      fs.writeFileSync(transcriptPath, transcript)
+    }
+
+    const updated = {
+      ...meeting,
+      status: 'recorded',
+      audioPath,
+      audioOriginalName: req.file.originalname || '',
+      audioMimeType: mime,
+      transcriptPath,
+      updatedAt: new Date().toISOString()
+    }
+    saveMeeting(updated)
+    res.json(updated)
+  } catch (error) {
+    res.status(500).json({ error: '保存录音失败', message: error.message })
+  }
+})
+
+app.post('/api/meetings/:id/retranscribe', async (req, res) => {
+  try {
+    const meeting = loadMeeting(req.params.id)
+    if (!meeting) return res.status(404).json({ error: '会议不存在' })
+    if (!meeting.audioPath || !fs.existsSync(meeting.audioPath)) {
+      return res.status(400).json({ error: '该会议没有可转写的录音文件' })
+    }
+
+    const transcribing = { ...meeting, status: 'transcribing', updatedAt: new Date().toISOString() }
+    saveMeeting(transcribing)
+    const transcription = await transcribeAudioFile(meeting.audioPath, req.body?.transcription || {})
+    const transcript = transcription.text || ''
+    const transcriptPath = path.join(MEETINGS_DIR, meeting.id, 'transcript.md')
+    if (transcript) fs.writeFileSync(transcriptPath, transcript)
+
+    const updated = {
+      ...meeting,
+      status: transcript ? 'transcribed' : 'recorded',
+      transcriptPath: transcript ? transcriptPath : meeting.transcriptPath,
+      updatedAt: new Date().toISOString(),
+      transcription: {
+        provider: transcription.provider,
+        model: transcription.model || '',
+        error: transcription.error || ''
+      }
+    }
+    saveMeeting(updated)
+    res.json({ ...meetingSummary(updated), transcript, minutes: readTextFileIfExists(updated.minutesPath) })
+  } catch (error) {
+    res.status(500).json({ error: '重新转写失败', message: error.message })
+  }
+})
+
+app.post('/api/meetings/:id/finalize', async (req, res) => {
+  try {
+    const meeting = loadMeeting(req.params.id)
+    if (!meeting) return res.status(404).json({ error: '会议不存在' })
+
+    let transcript = String(req.body?.transcript || (
+      meeting.transcriptPath && fs.existsSync(meeting.transcriptPath)
+        ? fs.readFileSync(meeting.transcriptPath, 'utf8')
+        : ''
+    )).trim()
+    let transcription = { text: transcript, provider: transcript ? 'provided' : '', error: '' }
+
+    if (!transcript && meeting.audioPath) {
+      const transcribing = { ...meeting, status: 'transcribing', updatedAt: new Date().toISOString() }
+      saveMeeting(transcribing)
+      transcription = await transcribeAudioFile(meeting.audioPath, req.body?.transcription || {})
+      transcript = transcription.text || ''
+      if (transcript) {
+        const transcriptPath = path.join(MEETINGS_DIR, meeting.id, 'transcript.md')
+        fs.writeFileSync(transcriptPath, transcript)
+        meeting.transcriptPath = transcriptPath
+      }
+    } else if (transcript && !meeting.transcriptPath) {
+      const transcriptPath = path.join(MEETINGS_DIR, meeting.id, 'transcript.md')
+      fs.writeFileSync(transcriptPath, transcript)
+      meeting.transcriptPath = transcriptPath
+    }
+
+    let minutes = ''
+    let model = ''
+    if (transcript) {
+      try {
+        const result = await callInternalAgent({
+          modelKey: req.body?.model,
+          temperature: 0.25,
+          maxTokens: 5000,
+          messages: [
+            {
+              role: 'system',
+              content: '你是灵枢会议纪要 Agent。根据逐字稿生成中文 Markdown 会议纪要，包含：一句话结论、会议摘要、关键讨论、决策、待办事项（负责人/截止时间如未知写未定）、风险与后续跟进。不要编造逐字稿中没有的信息。'
+            },
+            { role: 'user', content: `会议标题：${meeting.title}\n\n逐字稿：\n${transcript}` }
+          ]
+        })
+        minutes = result.text.trim()
+        model = result.model
+      } catch (error) {
+        minutes = buildFallbackMinutes({ title: meeting.title, transcript, audioPath: meeting.audioPath })
+      }
+    } else {
+      minutes = buildFallbackMinutes({ title: meeting.title, transcript: '', audioPath: meeting.audioPath })
+    }
+
+    const meetingDir = path.join(MEETINGS_DIR, meeting.id)
+    const localMinutesPath = path.join(meetingDir, 'minutes.md')
+    fs.writeFileSync(localMinutesPath, minutes)
+    const vaultNote = writeMinutesToVault({ title: meeting.title, content: minutes })
+
+    const updated = {
+      ...meeting,
+      status: transcript ? 'summarized' : 'recorded',
+      transcriptPath: meeting.transcriptPath,
+      minutesPath: localMinutesPath,
+      vaultRelativePath: vaultNote?.relativePath || '',
+      updatedAt: new Date().toISOString(),
+      transcription: {
+        provider: transcription.provider,
+        model: transcription.model || '',
+        error: transcription.error || ''
+      }
+    }
+    saveMeeting(updated)
+    res.json({ ...updated, minutes, model, transcript })
+  } catch (error) {
+    res.status(500).json({ error: '生成会议纪要失败', message: error.message })
   }
 })
 
@@ -2466,9 +5727,9 @@ if (distPath) {
 
 // ==================== 启动服务器 ====================
 
-app.listen(PORT, () => {
-  console.log(`🚀 OpenClaw Web UI Server running on port ${PORT}`)
-  console.log(`📱 API: http://localhost:${PORT}/api`)
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`🚀 灵枢 App Server running on port ${PORT}`)
+  console.log(`📱 API: http://127.0.0.1:${PORT}/api`)
   console.log(`💾 Data: ${DATA_DIR}`)
   console.log(`\n已加载 ${instances.length} 个实例：`)
   instances.forEach(i => console.log(`  • ${i.name} (${i.type}) - ${i.status}`))

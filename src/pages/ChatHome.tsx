@@ -71,7 +71,7 @@ const ChatHome: React.FC = () => {
   const [selectedModel, setSelectedModel] = useState<string>('qwen-3.6-plus')
   const [mode, setMode] = useState<string>('auto')
   const [messages, setMessages] = useState<Message[]>([
-    { id: '1', role: 'assistant', content: '你好！我是 OpenClaw 助手。我可以帮你生成图片、代码、文档等。', timestamp: '09:20', model: 'qwen-3.6-plus' },
+    { id: '1', role: 'assistant', content: '你好！我是灵枢助手。我可以帮你生成图片、代码、文档等。', timestamp: '09:20', model: 'qwen-3.6-plus' },
     { id: '2', role: 'user', content: '生成图片：一张蓝天白云的风景图', timestamp: '09:25' },
     { id: '3', role: 'assistant', content: '{\n  "impact": {\n    "skillCode": "media.image.generate",\n    "objectName": "生成图片：一张蓝天白云的风景图",\n    "objectType": "skill_run"\n  },\n  "payload": {\n    "title": "生成图片：一张蓝天白云的风景图",\n    "payload": {\n      "size": "1024x1024",\n      "count": 1\n    }\n  }\n}', timestamp: '09:25', isTask: true, model: 'qwen-3.6-plus' },
   ])
@@ -82,7 +82,7 @@ const ChatHome: React.FC = () => {
   const models: Model[] = [
     { id: 'step-alpha', name: 'Step-Alpha', provider: '阶跃星辰', icon: <RobotOutlined /> },
     { id: 'qwen-3.6-plus', name: '千问全能(3.6)', provider: '阿里云', icon: <ThunderboltOutlined /> },
-    { id: 'xiaomimimo-2.5-pro', name: 'xiaomimimo-2.5-pro', provider: 'OpenClaw', icon: <ToolOutlined /> },
+    { id: 'xiaomimimo-2.5-pro', name: 'xiaomimimo-2.5-pro', provider: '灵枢', icon: <ToolOutlined /> },
     { id: 'glm-4', name: 'GLM-4', provider: '智谱AI', icon: <RobotOutlined /> },
     { id: 'doubao-pro', name: '豆包Pro', provider: '火山引擎', icon: <RobotOutlined /> },
   ]

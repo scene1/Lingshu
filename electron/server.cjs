@@ -22,14 +22,14 @@ if (!fs.existsSync(CHAT_DIR)) fs.mkdirSync(CHAT_DIR, { recursive: true })
 
 const DEFAULT_INSTANCES = [
   {
-    id: 'local', name: '本地 OpenClaw', type: 'local', status: 'connected',
+    id: 'local', name: '本地灵枢运行时', type: 'local', status: 'connected',
     configPath: '~/.stepclaw/openclaw.json', workspacePath: '~/.stepclaw/workspace',
-    description: '当前机器上的 OpenClaw 实例', lastConnected: new Date().toISOString()
+    description: '当前机器上的灵枢运行实例', lastConnected: new Date().toISOString()
   },
   {
-    id: 'stepfun-desktop', name: '小跃你 (阶跃桌面端)', type: 'stepfun-desktop', status: 'connected',
+    id: 'agent-desktop', name: 'Agent 桌面端', type: 'agent-desktop', status: 'disconnected',
     configPath: '~/.stepclaw/openclaw.json', workspacePath: '~/.stepclaw/workspace',
-    description: '阶跃 AI 桌面端托管的 OpenClaw', lastConnected: new Date().toISOString()
+    description: '本机 Agent 桌面端连接', lastConnected: ''
   }
 ]
 
@@ -183,7 +183,7 @@ app.post('/api/instances/:id/test', (req, res) => {
   const instance = instances.find(i => i.id === req.params.id)
   if (!instance) return res.status(404).json({ error: '实例不存在' })
   try {
-    if (instance.type === 'local' || instance.type === 'stepfun-desktop') {
+    if (instance.type === 'local' || instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop') {
       const configPath = instance.configPath.replace('~', os.homedir())
       if (fs.existsSync(configPath)) {
         instance.status = 'connected'
@@ -234,7 +234,7 @@ app.post('/api/instances/:id/config', (req, res) => {
 app.post('/api/instances/:id/restart', (req, res) => {
   const instance = instances.find(i => i.id === req.params.id)
   if (!instance) return res.status(404).json({ error: '实例不存在' })
-  if (instance.type === 'local' || instance.type === 'stepfun-desktop') {
+  if (instance.type === 'local' || instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop') {
     exec('openclaw gateway restart', (error, stdout, stderr) => {
       if (error) res.status(500).json({ error: '重启失败', message: error.message })
       else res.json({ success: true, message: 'OpenClaw 已重启' })
@@ -1044,8 +1044,8 @@ app.post('/api/skills/install', skillsUpload.single('file'), (req, res) => {
 app.post('/api/instances/:id/skills/:skillName/execute', (req, res) => {
   const instance = instances.find(i => i.id === req.params.id)
   if (!instance) return res.status(404).json({ error: '实例不存在' })
-  if (instance.type !== 'local' && instance.type !== 'stepfun-desktop') {
-    return res.status(403).json({ error: '只有本地实例可以执行技能' })
+  if (instance.type !== 'local' && instance.type !== 'agent-desktop' && instance.type !== 'stepfun-desktop') {
+    return res.status(403).json({ error: '只有本地运行时或 Agent 桌面端可以执行技能' })
   }
   const { params = '' } = req.body
   const command = `export OPENCLAW_STATE_DIR=${os.homedir()}/.stepclaw && export PATH=${os.homedir()}/.stepclaw/bin:$PATH && openclaw skills run ${req.params.skillName} "${params}"`

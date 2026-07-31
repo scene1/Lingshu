@@ -60,7 +60,96 @@ interface Session {
   isFavorite?: boolean
 }
 
+interface RuntimeInstance {
+  id: string
+  name: string
+  type: string
+  appName?: string
+  status?: string
+}
+
 const MODEL_STORAGE_KEY = 'openclaw-selected-model'
+const APP_COMMAND_LABELS: Record<string, string> = {
+  feishu: '飞书',
+  lark: '飞书',
+  wechat: '微信',
+  chrome: 'Chrome',
+  vscode: 'VS Code',
+  terminal: '终端',
+  finder: 'Finder',
+  safari: 'Safari',
+  parazta: 'ParaZTA',
+  ParaZTA: 'ParaZTA',
+}
+
+const APP_COMMAND_ALIASES: Record<string, string> = {
+  飞书: 'feishu',
+  lark: 'feishu',
+  微信: 'wechat',
+  wechat: 'wechat',
+  chrome: 'chrome',
+  谷歌浏览器: 'chrome',
+  vscode: 'vscode',
+  code: 'vscode',
+  'visual studio code': 'vscode',
+  终端: 'terminal',
+  terminal: 'terminal',
+  finder: 'finder',
+  访达: 'finder',
+  safari: 'safari',
+  parazta: 'ParaZTA',
+}
+
+function normalizeAppNameFromText(value: string) {
+  const clean = value
+    .trim()
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+    .replace(/\s*(应用|app|软件|程序)$/i, '')
+    .trim()
+  if (!clean) return ''
+  return APP_COMMAND_ALIASES[clean.toLowerCase()] || APP_COMMAND_ALIASES[clean] || clean
+}
+
+function extractAppOpenCommand(text: string) {
+  const clean = text.trim()
+  const direct = clean.match(/^打开\s*(.+)$/i)
+  if (direct) return normalizeAppNameFromText(direct[1])
+
+  const openByName = clean.match(/open\s+-a\s+["']?([^"'\n`]+)["']?/i)
+  if (openByName) return normalizeAppNameFromText(openByName[1])
+
+  const openPath = clean.match(/open\s+(?:["']?)(?:\/Applications\/)?([^"'\n`]+?)(?:\.app)?(?:["']?)(?:\s|$)/i)
+  if (openPath) return normalizeAppNameFromText(openPath[1])
+
+  return ''
+}
+
+function extractRunnableAppFromAssistant(messages: Message[]) {
+  const lastAssistant = [...messages].reverse().find(item => item.role === 'assistant')
+  if (!lastAssistant) return ''
+  return extractAppOpenCommand(lastAssistant.content)
+}
+
+function extractAgentInvocationCommand(text: string, agents: RuntimeInstance[]) {
+  const clean = text.trim()
+  if (!clean || agents.length === 0) return null
+  const prefixMatch = clean.match(/^(调用|让|使用)\s*(.+)$/i)
+  if (!prefixMatch) return null
+  const rest = prefixMatch[2].trim()
+  const candidates = agents
+    .flatMap(agent => [agent.name, agent.appName].filter(Boolean).map(name => ({ agent, name: String(name) })))
+    .sort((a, b) => b.name.length - a.name.length)
+  for (const candidate of candidates) {
+    if (!rest.toLowerCase().startsWith(candidate.name.toLowerCase())) continue
+    const instruction = rest
+      .slice(candidate.name.length)
+      .trim()
+      .replace(/^(帮我|去|来|执行|处理|打开|做|完成)\s*/i, '')
+      .trim()
+    return { agent: candidate.agent, instruction: instruction || clean }
+  }
+  return null
+}
 
 // 安全的 JSON 解析，当响应不是 JSON 时给出友好错误
 async function safeJson(response: Response) {
@@ -80,6 +169,7 @@ const RealChat: React.FC = () => {
   const [sessions, setSessions] = useState<Session[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<string>('')
   const [currentInstanceId, _setCurrentInstanceId] = useState<string>('local') // 默认使用本地实例
+  const [agentDesktopInstances, setAgentDesktopInstances] = useState<RuntimeInstance[]>([])
   const [currentModel, setCurrentModel] = useState<string>(() => {
     try {
       return localStorage.getItem(MODEL_STORAGE_KEY) || ''
@@ -99,6 +189,7 @@ const RealChat: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const skipNextSessionLoadRef = useRef(false)
 
   // 加载会话列表（用 useCallback 避免闭包过期）
   const loadSessions = useCallback(async () => {
@@ -133,7 +224,20 @@ const RealChat: React.FC = () => {
   useEffect(() => {
     loadSessions()
     loadModels()
+    loadAgentDesktopInstances()
   }, [loadSessions])
+
+  const loadAgentDesktopInstances = async () => {
+    try {
+      const response = await fetch('/api/instances')
+      if (!response.ok) return
+      const data = await response.json()
+      setAgentDesktopInstances((Array.isArray(data) ? data : [])
+        .filter((item: RuntimeInstance) => item.type === 'agent-desktop' || item.type === 'stepfun-desktop'))
+    } catch (error) {
+      console.error('加载本机 Agent 失败:', error)
+    }
+  }
 
   // 加载可用模型列表
   const loadModels = async () => {
@@ -170,6 +274,10 @@ const RealChat: React.FC = () => {
   // 切换会话时加载消息
   useEffect(() => {
     if (currentSessionId) {
+      if (skipNextSessionLoadRef.current) {
+        skipNextSessionLoadRef.current = false
+        return
+      }
       loadSessionMessages(currentSessionId)
     }
   }, [currentSessionId, loadSessionMessages])
@@ -180,6 +288,190 @@ const RealChat: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
+  const createSession = async (title: string) => {
+    const response = await fetch(`/api/instances/${currentInstanceId}/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title })
+    })
+    if (!response.ok) throw new Error('创建会话失败')
+    const newSession = await safeJson(response)
+    skipNextSessionLoadRef.current = true
+    setCurrentSessionId(newSession.id)
+    setSessions(prev => [newSession, ...prev])
+    return newSession
+  }
+
+  const appendSessionEvents = async (sessionId: string, nextMessages: Message[]) => {
+    const response = await fetch(`/api/instances/${currentInstanceId}/sessions/${sessionId}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: currentModel,
+        messages: nextMessages
+      })
+    })
+    if (!response.ok) throw new Error('保存会话事件失败')
+    return safeJson(response)
+  }
+
+  const ensureActiveSession = async (title: string) => {
+    if (currentSessionId) return currentSessionId
+    const newSession = await createSession(title.substring(0, 20) || '新会话')
+    return newSession.id
+  }
+
+  const runAppOpenCommand = async (appKey: string, promptText?: string) => {
+    const cleanPrompt = (promptText || `打开${APP_COMMAND_LABELS[appKey] || appKey}`).trim()
+    if (!cleanPrompt || isLoading) return
+
+    let sessionId = currentSessionId
+    try {
+      sessionId = await ensureActiveSession(cleanPrompt)
+    } catch (error) {
+      message.error('创建会话失败')
+      return
+    }
+
+    const now = Date.now()
+    const userMessage: Message = {
+      id: String(now),
+      role: 'user',
+      content: cleanPrompt,
+      timestamp: new Date().toISOString()
+    }
+    const appLabel = APP_COMMAND_LABELS[appKey] || appKey
+
+    setInputValue('')
+    setIsLoading(true)
+    setMessages(prev => [...prev, userMessage])
+
+    let assistantMessage: Message
+    try {
+      const response = await fetch(`/api/instances/${currentInstanceId}/apps/${encodeURIComponent(appKey)}/open`, {
+        method: 'POST'
+      })
+      const result = await safeJson(response)
+      const resultDetails = [
+        result.openedAs ? `打开目标：${result.openedAs}` : null,
+        result.path ? `路径：${result.path}` : null,
+        result.verified === true ? '状态：已检测到进程' : null,
+        result.opened && result.verified === false ? '状态：打开请求已发送，但未检测到进程' : null,
+      ].filter(Boolean).join('\n')
+      assistantMessage = {
+        id: String(now + 1),
+        role: 'assistant',
+        content: result.success
+          ? `✅ 已打开 ${appLabel}\n\n> 工具调用：本地应用启动${resultDetails ? `\n> ${resultDetails.replace(/\n/g, '\n> ')}` : ''}`
+          : `❌ 打开 ${appLabel} 失败：${result.error || '未知错误'}${resultDetails ? `\n\n> ${resultDetails.replace(/\n/g, '\n> ')}` : ''}`,
+        timestamp: new Date().toISOString(),
+        model: 'tool'
+      }
+      if (result.success) message.success(`已打开 ${appLabel}`)
+    } catch (error: any) {
+      assistantMessage = {
+        id: String(now + 1),
+        role: 'assistant',
+        content: `❌ 打开 ${appLabel} 失败：${error.message || '未知错误'}`,
+        timestamp: new Date().toISOString(),
+        model: 'tool'
+      }
+      message.error('执行命令失败: ' + (error.message || '未知错误'))
+    }
+
+    const eventMessages = [userMessage, assistantMessage]
+    setMessages(prev => [...prev, assistantMessage])
+    try {
+      const savedSession = await appendSessionEvents(sessionId, eventMessages)
+      setMessages(savedSession.messages || eventMessages)
+      loadSessions()
+    } catch (error: any) {
+      message.warning('工具已执行，但会话历史保存失败：' + (error.message || '未知错误'))
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const runDesktopAgentInvocation = async (agent: RuntimeInstance, instruction?: string) => {
+    const cleanPrompt = (instruction || `调用 ${agent.name}`).trim()
+    if (!cleanPrompt || isLoading) return
+
+    let sessionId = currentSessionId
+    try {
+      sessionId = await ensureActiveSession(cleanPrompt)
+    } catch (error) {
+      message.error('创建会话失败')
+      return
+    }
+
+    const now = Date.now()
+    const userMessage: Message = {
+      id: String(now),
+      role: 'user',
+      content: cleanPrompt,
+      timestamp: new Date().toISOString()
+    }
+
+    setInputValue('')
+    setIsLoading(true)
+    setMessages(prev => [...prev, userMessage])
+
+    let assistantMessage: Message
+    try {
+      const response = await fetch(`/api/instances/${agent.id}/agent-desktop/invoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction: cleanPrompt, source: 'chat' })
+      })
+      const result = await safeJson(response)
+      const modeLabel = result.mode === 'cli'
+        ? 'CLI 投递'
+        : result.mode === 'url-scheme'
+          ? 'URL Scheme 投递'
+          : '打开 App'
+      const resultLines = [
+        `> 工具调用：本机 Agent 桌面端`,
+        `> 模式：${modeLabel}`,
+        result.appPath ? `> 路径：${result.appPath}` : '',
+        result.cliCommand ? `> CLI：${result.cliCommand}` : '',
+        result.url ? `> URL：${result.url}` : '',
+        result.stdout ? `\nCLI 输出：\n\`\`\`\n${String(result.stdout).slice(0, 1200)}\n\`\`\`` : '',
+        result.message ? `\n${result.message}` : ''
+      ].filter(Boolean).join('\n')
+      assistantMessage = {
+        id: String(now + 1),
+        role: 'assistant',
+        content: result.success
+          ? `✅ 已调用 ${result.appName || agent.name}\n\n${resultLines}`
+          : `❌ 调用 ${agent.name} 失败：${result.error || '未知错误'}`,
+        timestamp: new Date().toISOString(),
+        model: 'tool'
+      }
+      message.success(`已调用 ${result.appName || agent.name}`)
+    } catch (error: any) {
+      assistantMessage = {
+        id: String(now + 1),
+        role: 'assistant',
+        content: `❌ 调用 ${agent.name} 失败：${error.message || '未知错误'}`,
+        timestamp: new Date().toISOString(),
+        model: 'tool'
+      }
+      message.error('调用本机 Agent 失败: ' + (error.message || '未知错误'))
+    }
+
+    const eventMessages = [userMessage, assistantMessage]
+    setMessages(prev => [...prev, assistantMessage])
+    try {
+      const savedSession = await appendSessionEvents(sessionId, eventMessages)
+      setMessages(savedSession.messages || eventMessages)
+      loadSessions()
+    } catch (error: any) {
+      message.warning('Agent 已调用，但会话历史保存失败：' + (error.message || '未知错误'))
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
   useEffect(() => {
     scrollToBottom()
   }, [messages])
@@ -188,67 +480,38 @@ const RealChat: React.FC = () => {
   const handleSend = async () => {
     if (!inputValue.trim() || isLoading) return
 
-    // 如果没有当前会话，创建一个新会话
-    let sessionId = currentSessionId
-    if (!sessionId) {
-      try {
-        const response = await fetch(`/api/instances/${currentInstanceId}/sessions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: inputValue.substring(0, 20) })
-        })
-        if (response.ok) {
-          const newSession = await response.json()
-          sessionId = newSession.id
-          setCurrentSessionId(sessionId)
-          setSessions([newSession, ...sessions])
-        }
-      } catch (error) {
-        message.error('创建会话失败')
+    const agentInvocation = extractAgentInvocationCommand(inputValue, agentDesktopInstances)
+    if (agentInvocation) {
+      await runDesktopAgentInvocation(agentInvocation.agent, agentInvocation.instruction)
+      return
+    }
+
+    // 解析本地 App 打开命令：既支持“打开飞书”，也支持“打开 ParaZTA”
+    const appOpenCommand = extractAppOpenCommand(inputValue)
+    if (appOpenCommand) {
+      await runAppOpenCommand(appOpenCommand, inputValue)
+      return
+    }
+
+    // 如果上一条模型回复给出了 open 命令，用户回复“执行”时尝试执行该 App 打开动作
+    if (/^(执行|运行|打开|可以|确认|是)$/i.test(inputValue.trim())) {
+      const runnableApp = extractRunnableAppFromAssistant(messages)
+      if (runnableApp) {
+        await runAppOpenCommand(runnableApp, inputValue)
         return
       }
     }
 
-    // 解析快捷命令
-    const commandPatterns = [
-      { pattern: /^打开(飞书|lark)$/i, action: 'feishu', type: 'app' },
-      { pattern: /^打开(微信|wechat)$/i, action: 'wechat', type: 'app' },
-      { pattern: /^打开(chrome|谷歌浏览器)$/i, action: 'chrome', type: 'app' },
-      { pattern: /^打开(vscode|code|visual studio code)$/i, action: 'vscode', type: 'app' },
-      { pattern: /^打开(终端|terminal)$/i, action: 'terminal', type: 'app' },
-    ]
-    
-    const matchedCommand = commandPatterns.find(cmd => cmd.pattern.test(inputValue.trim()))
-    
-    if (matchedCommand) {
-      // 执行命令
-      setInputValue('')
-      setIsLoading(true)
-      
+    // 如果没有当前会话，创建一个新会话
+    let sessionId = currentSessionId
+    if (!sessionId) {
       try {
-        if (matchedCommand.type === 'app') {
-          const response = await fetch(`/api/instances/${currentInstanceId}/apps/${matchedCommand.action}/open`, {
-            method: 'POST'
-          })
-          const result = await response.json()
-          
-          const systemMessage: Message = {
-            id: Date.now().toString(),
-            role: 'assistant',
-            content: result.success 
-              ? `✅ 已打开 ${matchedCommand.action}` 
-              : `❌ 打开失败: ${result.error || '未知错误'}`,
-            timestamp: new Date().toISOString(),
-            model: 'system'
-          }
-          setMessages(prev => [...prev, systemMessage])
-        }
-      } catch (error: any) {
-        message.error('执行命令失败: ' + error.message)
-      } finally {
-        setIsLoading(false)
+        const newSession = await createSession(inputValue.substring(0, 20))
+        sessionId = newSession.id
+      } catch (error) {
+        message.error('创建会话失败')
+        return
       }
-      return
     }
 
     const userMessage: Message = {
@@ -498,7 +761,7 @@ const RealChat: React.FC = () => {
           <div className="chat-sidebar-title">
             <div className="chat-brand-icon"><RobotOutlined /></div>
             <div>
-              <div className="chat-brand-name">OpenClaw Chat</div>
+              <div className="chat-brand-name">灵枢对话</div>
               <div className="chat-brand-meta">{sessions.length} 个会话 · local 实例</div>
             </div>
           </div>
@@ -665,7 +928,7 @@ const RealChat: React.FC = () => {
                 <div className="chat-empty-title">准备开始一个新会话</div>
                 <div className="chat-empty-desc">选择模型后直接输入问题，也可以粘贴图片或用下方技能调用本地能力。</div>
                 <Space wrap>
-                  <Button onClick={() => setInputValue('帮我总结一下 OpenClaw 当前能力')}>总结能力</Button>
+                  <Button onClick={() => setInputValue('帮我总结一下灵枢当前能力')}>总结能力</Button>
                   <Button onClick={() => setInputValue('打开 Chrome')}>打开 Chrome</Button>
                   <Button type="primary" onClick={() => setInputValue('你好！')}>发送第一条消息</Button>
                 </Space>
@@ -774,30 +1037,26 @@ const RealChat: React.FC = () => {
                         { key: 'wechat', label: '打开微信', icon: <RobotOutlined /> },
                         { key: 'chrome', label: '打开 Chrome', icon: <DesktopOutlined /> },
                         { key: 'vscode', label: '打开 VS Code', icon: <CodeOutlined /> },
+                        ...(agentDesktopInstances.length > 0 ? [
+                          { type: 'divider' as const },
+                          ...agentDesktopInstances.map(agent => ({
+                            key: `agent:${agent.id}`,
+                            label: `调用 ${agent.appName || agent.name}`,
+                            icon: <DesktopOutlined />
+                          }))
+                        ] : []),
                         { type: 'divider' },
                         { key: 'weather', label: '插入天气查询', icon: <ThunderboltOutlined /> },
                       ],
                       onClick: async ({ key }) => {
-                        const instanceId = 'local' // 使用本地实例
-                        
                         if (key === 'weather') {
                           setInputValue(prev => `${prev}${prev ? '\n' : ''}请查询北京天气，并给出简洁建议`)
                           message.success('已插入天气查询提示')
+                        } else if (String(key).startsWith('agent:')) {
+                          const agent = agentDesktopInstances.find(item => item.id === String(key).slice('agent:'.length))
+                          if (agent) await runDesktopAgentInvocation(agent)
                         } else {
-                          // 打开本地应用
-                          try {
-                            const response = await fetch(`/api/instances/${instanceId}/apps/${key}/open`, {
-                              method: 'POST'
-                            })
-                            const result = await safeJson(response)
-                            if (result.success) {
-                              message.success(`已打开 ${key}`)
-                            } else {
-                              message.error(result.error || '打开失败')
-                            }
-                          } catch (error: any) {
-                            message.error('调用失败: ' + error.message)
-                          }
+                          await runAppOpenCommand(String(key))
                         }
                       }
                     }}

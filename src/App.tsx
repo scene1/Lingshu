@@ -6,13 +6,13 @@ import {
   MessageOutlined,
   CloudOutlined,
   RobotOutlined,
-  DatabaseOutlined,
   BranchesOutlined,
   ApiOutlined,
   SettingOutlined,
   TeamOutlined,
   MenuFoldOutlined,
-  MenuUnfoldOutlined
+  MenuUnfoldOutlined,
+  FileTextOutlined
 } from '@ant-design/icons'
 import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom'
 // 路由懒加载：首屏只加载当前页面，其余按需加载
@@ -22,12 +22,12 @@ const AgentManager = React.lazy(() => import('./pages/AgentManager'))
 const Skills = React.lazy(() => import('./pages/Skills'))
 const InstanceManager = React.lazy(() => import('./pages/InstanceManager'))
 const ModelConfig = React.lazy(() => import('./pages/ModelConfig'))
-const SystemStatus = React.lazy(() => import('./pages/SystemStatus'))
 const Workflow = React.lazy(() => import('./pages/Workflow'))
 const ChannelManager = React.lazy(() => import('./pages/ChannelManager'))
 const MCPConfig = React.lazy(() => import('./pages/MCPConfig'))
 const Settings = React.lazy(() => import('./pages/Settings'))
 const GroupChat = React.lazy(() => import('./pages/GroupChat'))
+const DocumentWorkbench = React.lazy(() => import('./pages/DocumentWorkbench'))
 import { SettingsProvider, useSettings } from './contexts/SettingsContext'
 
 const { Header, Sider, Content } = Layout
@@ -64,17 +64,17 @@ const AppInner: React.FC = () => {
     {
       key: '/dashboard',
       icon: <DashboardOutlined />,
-      label: <Link to="/dashboard">Dashboard</Link>
+      label: <Link to="/dashboard">系统概览</Link>
     },
     {
       key: '/agents',
       icon: <RobotOutlined />,
-      label: <Link to="/agents">Agent 管理</Link>
+      label: <Link to="/agents">Agent 角色库</Link>
     },
     {
       key: '/instances',
       icon: <CloudOutlined />,
-      label: <Link to="/instances">实例管理</Link>
+      label: <Link to="/instances">运行实例</Link>
     },
     {
       key: '/skills',
@@ -87,34 +87,34 @@ const AppInner: React.FC = () => {
       label: <Link to="/model-config">模型配置</Link>
     },
     {
-      key: '/system-status',
-      icon: <DatabaseOutlined />,
-      label: <Link to="/system-status">系统状态</Link>
-    },
-    {
       key: '/group-chat',
       icon: <TeamOutlined />,
       label: <Link to="/group-chat">多 Agent 群聊</Link>
     },
     {
+      key: '/documents',
+      icon: <FileTextOutlined />,
+      label: <Link to="/documents">文档工作台</Link>
+    },
+    {
       key: 'advanced',
       icon: <BranchesOutlined />,
-      label: '高级功能',
+      label: '实验室',
       children: [
         {
           key: '/channels',
           icon: <ApiOutlined />,
-          label: <Link to="/channels">渠道管理</Link>
+          label: <Link to="/channels">集成渠道（实验）</Link>
         },
         {
           key: '/mcp',
           icon: <CloudOutlined />,
-          label: <Link to="/mcp">MCP/CLI</Link>
+          label: <Link to="/mcp">工具运行时（实验）</Link>
         },
         {
           key: '/workflows',
           icon: <BranchesOutlined />,
-          label: <Link to="/workflows">工作流</Link>
+          label: <Link to="/workflows">自动化流程（实验）</Link>
         }
       ]
     },
@@ -146,7 +146,7 @@ const AppInner: React.FC = () => {
             fontWeight: 'bold',
             color: '#1890ff'
           }}>
-            {collapsed ? 'LS' : 'Lingshu'}
+            {collapsed ? '灵' : '灵枢'}
           </div>
           <Menu
             mode="inline"
@@ -171,7 +171,7 @@ const AppInner: React.FC = () => {
                 onClick={() => setCollapsed(!collapsed)}
                 style={{ fontSize: 16 }}
               />
-              <h1 style={{ margin: 0, fontSize: 20 }}>Lingshu</h1>
+              <h1 style={{ margin: 0, fontSize: 20 }}>灵枢</h1>
             </div>
             <span className="app-shell-version" style={{ color: '#999' }}>v1.0.0</span>
           </Header>
@@ -183,7 +183,7 @@ const AppInner: React.FC = () => {
             </div>
           }>
           <Content
-            style={location.pathname === '/' || location.pathname === '/group-chat' ? {
+            style={location.pathname === '/' || location.pathname === '/group-chat' || location.pathname === '/documents' ? {
               height: 'calc(100vh - 64px)',
               overflow: 'hidden',
               margin: 0,
@@ -206,11 +206,12 @@ const AppInner: React.FC = () => {
               <Route path="/instances" element={<InstanceManager />} />
               <Route path="/skills" element={<Skills />} />
               <Route path="/model-config" element={<ModelConfig />} />
-              <Route path="/system-status" element={<SystemStatus />} />
+              <Route path="/system-status" element={<Navigate to="/dashboard" replace />} />
               <Route path="/workflows" element={<Workflow />} />
               <Route path="/channels" element={<ChannelManager />} />
               <Route path="/mcp" element={<MCPConfig />} />
               <Route path="/group-chat" element={<GroupChat />} />
+              <Route path="/documents" element={<DocumentWorkbench />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/config" element={<Navigate to="/settings" replace />} />
               <Route path="/location-picker" element={<Navigate to="/settings" replace />} />
