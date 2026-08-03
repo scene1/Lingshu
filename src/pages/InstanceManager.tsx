@@ -548,7 +548,7 @@ const InstanceManager: React.FC = () => {
                       form.setFieldsValue({
                         name: value,
                         configPath: `/Applications/${value}.app`,
-                        workspacePath: '~/.stepclaw/workspace',
+                        workspacePath: '~/Lingshu/workspace',
                         invocationMode: 'open'
                       })
                     }
@@ -617,18 +617,18 @@ const InstanceManager: React.FC = () => {
             name="configPath"
             label={selectedType === 'agent-desktop' ? '应用路径 / 配置路径' : '配置路径'}
             rules={[{ required: true, message: '请输入配置路径' }]}
-            initialValue="~/.stepclaw/openclaw.json"
+            initialValue="~/Lingshu/openclaw.json"
           >
-            <Input placeholder={selectedType === 'agent-desktop' ? '/Applications/Codex.app' : '~/.stepclaw/openclaw.json'} />
+            <Input placeholder={selectedType === 'agent-desktop' ? '/Applications/Codex.app' : '~/Lingshu/openclaw.json'} />
           </Form.Item>
           
           <Form.Item
             name="workspacePath"
             label="工作目录"
             rules={[{ required: true, message: '请输入工作目录' }]}
-            initialValue="~/.stepclaw/workspace"
+            initialValue="~/Lingshu/workspace"
           >
-            <Input placeholder="~/.stepclaw/workspace" />
+            <Input placeholder="~/Lingshu/workspace" />
           </Form.Item>
           
           <Form.Item

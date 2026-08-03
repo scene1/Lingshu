@@ -9,7 +9,7 @@ echo "🚀 OpenClaw Web UI 启动器"
 echo "=========================="
 
 # 配置
-PROJECT_DIR="$HOME/.stepclaw/workspace/projects/openclaw-web-ui"
+PROJECT_DIR="$HOME/Lingshu/workspace/projects/openclaw-web-ui"
 BACKEND_PORT=3005
 FRONTEND_PORT=3000
 
@@ -40,7 +40,7 @@ check_environment() {
     echo "✅ 项目目录: $PROJECT_DIR"
     
     # 检查 OpenClaw
-    if [ ! -d "$HOME/.stepclaw" ]; then
+    if [ ! -d "$HOME/Lingshu" ]; then
         echo "⚠️  OpenClaw 配置目录不存在"
     else
         echo "✅ OpenClaw 配置目录"
@@ -79,8 +79,8 @@ start_backend() {
     cd "$PROJECT_DIR"
     
     # 设置环境变量
-    export OPENCLAW_STATE_DIR="$HOME/.stepclaw"
-    export PATH="$HOME/.stepclaw/bin:$PATH"
+    export OPENCLAW_STATE_DIR="$HOME/Lingshu"
+    export PATH="$HOME/Lingshu/bin:$PATH"
     export PORT=$BACKEND_PORT
     
     # 启动后端

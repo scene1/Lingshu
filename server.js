@@ -19,21 +19,21 @@ app.use((err, req, res, next) => {
 })
 
 // 文件上传配置
-const uploadDir = path.join(os.homedir(), '.stepclaw', 'workspace', 'uploads')
+const uploadDir = path.join(os.homedir(), 'Lingshu', 'workspace', 'uploads')
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true })
 }
 const upload = multer({ dest: uploadDir })
 
 // 会话存储目录
-const CHAT_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'chat-history')
+const CHAT_DIR = path.join(os.homedir(), 'Lingshu', 'workspace', 'chat-history')
 if (!fs.existsSync(CHAT_DIR)) {
   fs.mkdirSync(CHAT_DIR, { recursive: true })
 }
 
 // OpenClaw 配置路径
-const OPENCLAW_CONFIG = process.env.OPENCLAW_CONFIG || '~/.stepclaw/openclaw.json'
-const SKILLS_DIR = process.env.SKILLS_DIR || '~/.stepclaw/skills'
+const OPENCLAW_CONFIG = process.env.OPENCLAW_CONFIG || '~/Lingshu/openclaw.json'
+const SKILLS_DIR = process.env.SKILLS_DIR || '~/Lingshu/skills'
 
 // ====== 模型供应商定义（与前端 ModelConfig.tsx 保持同步） ======
 const PROVIDERS = {
@@ -215,7 +215,7 @@ function generateLocalReply(message, history) {
     return '当前已安装 37 个 skills，包括：\n• code - 代码编写\n• weather - 天气查询\n• xlsx/pdf/docx - 文档处理\n• memory-guardian - 内存管理\n\n你可以在 Skills 管理页面查看全部。'
   }
   if (lowerMsg.includes('config') || lowerMsg.includes('配置')) {
-    return 'OpenClaw 配置文件位于 `~/.stepclaw/openclaw.json`\n\n主要配置项：\n• agents - 模型配置\n• skills - 技能加载路径\n• channels - 渠道配置\n\n你可以在配置管理页面编辑。'
+    return 'OpenClaw 配置文件位于 `~/Lingshu/openclaw.json`\n\n主要配置项：\n• agents - 模型配置\n• skills - 技能加载路径\n• channels - 渠道配置\n\n你可以在配置管理页面编辑。'
   }
   if (lowerMsg.includes('weather') || lowerMsg.includes('天气')) {
     return '我可以帮你查询天气。请告诉我你想查询哪个城市的天气？'
@@ -643,7 +643,7 @@ app.post('/api/instances/local/agents/:id/stop', (req, res) => {
 })
 
 // ====== 多 Agent 群聊 API ======
-const GROUP_CHAT_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'group-chat')
+const GROUP_CHAT_DIR = path.join(os.homedir(), 'Lingshu', 'workspace', 'group-chat')
 if (!fs.existsSync(GROUP_CHAT_DIR)) {
   fs.mkdirSync(GROUP_CHAT_DIR, { recursive: true })
 }

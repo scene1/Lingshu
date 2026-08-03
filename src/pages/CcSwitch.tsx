@@ -130,7 +130,7 @@ const CcSwitch: React.FC = () => {
           showIcon
           style={{ marginBottom: 16 }}
           message="内置 CC Switch 路由"
-          description="这里读取 ~/.cc-switch/cc-switch.db 的 openclaw 路由，切换后会同步写入 ~/.stepclaw/openclaw.json。"
+          description="这里读取 ~/.cc-switch/cc-switch.db 的 openclaw 路由，切换后会同步写入 ~/Lingshu/openclaw.json。"
         />
 
         <Space size="middle" wrap style={{ marginBottom: 16 }}>

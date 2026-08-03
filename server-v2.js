@@ -18,14 +18,14 @@ const PORT = process.env.PORT || 3003
 app.use(cors())
 app.use(express.json())
 
-// 数据存储目录
-const LEGACY_OPENCLAW_DATA_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'openclaw-web-ui-data')
-const DEFAULT_LINGSHU_DATA_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'lingshu-app-data')
-const DATA_DIR = process.env.LINGSHU_DATA_DIR || process.env.OPENCLAW_DATA_DIR || (fs.existsSync(LEGACY_OPENCLAW_DATA_DIR) ? LEGACY_OPENCLAW_DATA_DIR : DEFAULT_LINGSHU_DATA_DIR)
+// 数据存储目录：1.1.0 起统一迁移到 ~/Lingshu，保留 openclaw-web-ui-data 子目录以承接旧数据。
+const MIGRATED_OPENCLAW_DATA_DIR = path.join(os.homedir(), 'Lingshu', 'workspace', 'openclaw-web-ui-data')
+const DEFAULT_LINGSHU_DATA_DIR = path.join(os.homedir(), 'Lingshu', 'workspace', 'lingshu-app-data')
+const DATA_DIR = process.env.LINGSHU_DATA_DIR || process.env.OPENCLAW_DATA_DIR || (fs.existsSync(MIGRATED_OPENCLAW_DATA_DIR) ? MIGRATED_OPENCLAW_DATA_DIR : DEFAULT_LINGSHU_DATA_DIR)
 const INSTANCES_FILE = path.join(DATA_DIR, 'instances.json')
 const CHAT_DIR = path.join(DATA_DIR, 'chat-history')
-const UPLOAD_DIR = process.env.LINGSHU_UPLOAD_DIR || process.env.OPENCLAW_UPLOAD_DIR || path.join(os.homedir(), '.stepclaw', 'workspace', 'uploads')
-const USER_SKILLS_DIR = path.join(os.homedir(), '.stepclaw', 'skills')
+const UPLOAD_DIR = process.env.LINGSHU_UPLOAD_DIR || process.env.OPENCLAW_UPLOAD_DIR || path.join(os.homedir(), 'Lingshu', 'workspace', 'uploads')
+const USER_SKILLS_DIR = path.join(os.homedir(), 'Lingshu', 'skills')
 const DOCUMENT_VERSION_DIR = path.join(DATA_DIR, 'document-versions')
 const MEETINGS_DIR = path.join(DATA_DIR, 'meetings')
 const EXPORTS_DIR = path.join(DATA_DIR, 'exports')
@@ -103,8 +103,8 @@ const DEFAULT_INSTANCES = [
     name: '本地灵枢运行时',
     type: 'local',
     status: 'connected',
-    configPath: '~/.stepclaw/openclaw.json',
-    workspacePath: '~/.stepclaw/workspace',
+    configPath: '~/Lingshu/openclaw.json',
+    workspacePath: '~/Lingshu/workspace',
     description: '当前机器上的灵枢运行实例',
     lastConnected: new Date().toISOString()
   },
@@ -115,7 +115,7 @@ const DEFAULT_INSTANCES = [
     status: 'disconnected',
     appName: 'WorkBuddy',
     configPath: '/Applications/WorkBuddy.app',
-    workspacePath: '~/.stepclaw/workspace',
+    workspacePath: '~/Lingshu/workspace',
     description: '本机 WorkBuddy Agent 桌面端',
     lastConnected: ''
   },
@@ -126,7 +126,7 @@ const DEFAULT_INSTANCES = [
     status: 'disconnected',
     appName: 'Marvis',
     configPath: '/Applications/Marvis.app',
-    workspacePath: '~/.stepclaw/workspace',
+    workspacePath: '~/Lingshu/workspace',
     description: '本机 Marvis Agent 桌面端',
     lastConnected: ''
   },
@@ -137,7 +137,7 @@ const DEFAULT_INSTANCES = [
     status: 'disconnected',
     appName: 'Codex',
     configPath: '/Applications/Codex.app',
-    workspacePath: '~/.stepclaw/workspace',
+    workspacePath: '~/Lingshu/workspace',
     description: '本机 Codex Agent 桌面端',
     lastConnected: ''
   }
@@ -428,7 +428,7 @@ function collectSkills() {
   const skillsMap = new Map()
 
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) return []
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
 
@@ -467,7 +467,7 @@ function collectSkills() {
 function getConfiguredSkillRoots() {
   const roots = [USER_SKILLS_DIR]
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (fs.existsSync(configPath)) {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
       const extraDirs = Array.isArray(config?.skills?.load?.extraDirs) ? config.skills.load.extraDirs : []
@@ -2093,7 +2093,7 @@ function writeMinutesToVault({ title, content }) {
 
 
 function getLocalConfigPath() {
-  return path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+  return path.join(os.homedir(), 'Lingshu', 'openclaw.json')
 }
 
 function loadLocalConfig() {
@@ -2286,10 +2286,14 @@ const KNOWN_PROVIDERS = {
   anthropic: {
     name: 'Anthropic (Claude)', baseUrl: 'https://api.anthropic.com/v1',
     models: [
-      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
-      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' },
+      { id: 'claude-fable-5', name: 'Claude Fable 5 - 最新一代旗舰' },
+      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8（推荐）- 最新旗舰' },
+      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7 - 高性能推理' },
+      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6 - 强推理能力' },
+      { id: 'claude-opus-4-5', name: 'Claude Opus 4.5 - 稳定版本' },
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 - 平衡性能与速度' },
+      { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5 - 经典版本' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 - 极速响应' },
     ]
   },
   doubao: {
@@ -2349,7 +2353,7 @@ async function callProviderAI({ provider, apiKey, baseUrl, model, messages, opti
     const authHeader = apiKey.startsWith('gw-') ? { Authorization: `Bearer ${apiKey}` } : { 'x-api-key': apiKey }
     const response = await fetch(`${cleanBaseUrl}/v1/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01', ...authHeader },
+      headers: { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01', 'User-Agent': 'claude-cli/1.0.0', ...authHeader },
       body: JSON.stringify(body)
     })
     const data = await response.json().catch(() => ({}))
@@ -2375,7 +2379,7 @@ async function fetchProviderModels({ provider, apiKey, baseUrl }) {
     const url = isAnthropic ? `${cleanBaseUrl}/v1/models` : `${cleanBaseUrl}/models`
     const authHeader = isAnthropic && !apiKey.startsWith('gw-') ? { 'x-api-key': apiKey } : { Authorization: `Bearer ${apiKey}` }
     const response = await fetch(url, {
-      headers: { ...authHeader, ...(isAnthropic ? { 'anthropic-version': '2023-06-01' } : {}) },
+      headers: { ...authHeader, ...(isAnthropic ? { 'anthropic-version': '2023-06-01', 'User-Agent': 'claude-cli/1.0.0' } : {}) },
       signal: AbortSignal.timeout(12000)
     })
     const data = await response.json()
@@ -2492,7 +2496,7 @@ function updateCcSwitchCurrent(appType, providerId) {
 }
 
 function applyCcSwitchOpenClawProvider(provider) {
-  const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+  const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
   const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {}
   const models = Array.isArray(provider.settings.models) ? provider.settings.models : []
   const firstModel = models[0]
@@ -2645,7 +2649,7 @@ app.post('/api/local-agent-apps/seed-instances', (req, res) => {
         appName,
         bundleId: appInfo.bundleId || '',
         configPath: appPath,
-        workspacePath: '~/.stepclaw/workspace',
+        workspacePath: '~/Lingshu/workspace',
         invocationMode: appInfo.invocation?.suggestedInvocationMode || 'open',
         urlScheme: appInfo.invocation?.urlScheme || '',
         urlTemplate: appInfo.invocation?.urlScheme ? `${appInfo.invocation.urlScheme}://` : '',
@@ -2882,8 +2886,8 @@ app.get('/api/instances/:id/logs', (req, res) => {
 app.get('/api/logs', (req, res) => {
   try {
     const logPaths = [
-      path.join(os.homedir(), '.stepclaw', 'logs', 'openclaw.log'),
-      path.join(os.homedir(), '.stepclaw', 'logs', 'gateway.log'),
+      path.join(os.homedir(), 'Lingshu', 'logs', 'openclaw.log'),
+      path.join(os.homedir(), 'Lingshu', 'logs', 'gateway.log'),
     ]
     const logEntries = []
 
@@ -2923,7 +2927,7 @@ app.get('/api/logs', (req, res) => {
 
 // 默认获取本地实例的配置（兼容旧版 API）
 app.get('/api/config', (req, res) => {
-  const localInstance = instances.find(i => i.id === 'local')
+  const localInstance = instances.find(i => i.id === 'local') || DEFAULT_INSTANCES.find(i => i.id === 'local')
   if (!localInstance) {
     return res.status(404).json({ error: '本地实例不存在' })
   }
@@ -2939,7 +2943,7 @@ app.get('/api/config', (req, res) => {
 
 // 默认保存本地实例的配置（兼容旧版 API）
 app.post('/api/config', (req, res) => {
-  const localInstance = instances.find(i => i.id === 'local')
+  const localInstance = instances.find(i => i.id === 'local') || DEFAULT_INSTANCES.find(i => i.id === 'local')
   if (!localInstance) {
     return res.status(404).json({ error: '本地实例不存在' })
   }
@@ -3080,7 +3084,6 @@ app.post('/api/config/test-provider', async (req, res) => {
 
   try {
     const requestedModel = model || (KNOWN_PROVIDERS[provider]?.models?.[0]?.id || 'gpt-4o-mini')
-    const availableModels = await fetchProviderModels({ provider, apiKey, baseUrl })
     const testMessageResult = await callProviderAI({
       provider,
       apiKey,
@@ -3093,7 +3096,7 @@ app.post('/api/config/test-provider', async (req, res) => {
     res.json({
       success: testMessageResult.success,
       message: testMessageResult.success ? '连接成功' : (testMessageResult.error || '连接失败'),
-      availableModels,
+      availableModels: null,
       testMessageResult: testMessageResult.success
         ? { status: 'ok', reply: testMessageResult.data.text }
         : { status: 'error', statusCode: testMessageResult.statusCode, error: testMessageResult.error }
@@ -3546,7 +3549,7 @@ app.post('/api/instances/:instanceId/sessions/:sessionId/chat', async (req, res)
   }
   
   // 读取 openclaw.json 配置
-  const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+  const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
   
   // 读取会话
@@ -3804,8 +3807,8 @@ app.get('/api/instances/:id/skills', (req, res) => {
   const { id } = req.params
   
   try {
-    // 从 ~/.stepclaw/skills/ 读取真实的 skills
-    const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+    // 从 ~/Lingshu/skills/ 读取真实的 skills
+    const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
     const skills = []
     
     if (fs.existsSync(skillsDir)) {
@@ -4121,7 +4124,7 @@ app.post('/api/instances/:id/agent-desktop/invoke', async (req, res) => {
 // GET /api/dashboard/stats
 app.get('/api/dashboard/stats', (req, res) => {
   try {
-    const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+    const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
     let totalSkills = 0
     let activeSkills = 0
     if (fs.existsSync(skillsDir)) {
@@ -4225,7 +4228,7 @@ app.get('/api/dashboard/activity', (req, res) => {
 // 辅助函数：从 openclaw.json 读取 agents 配置
 function loadAgentsFromConfig() {
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (fs.existsSync(configPath)) {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
       const defaultModel = config.agents?.defaults?.model || config.models?.defaults?.model || ''
@@ -4266,7 +4269,7 @@ function loadAgentsFromConfig() {
 }
 
 function updateAgentStatusInConfig(agentId, status) {
-  const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+  const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
   if (!fs.existsSync(configPath)) return false
 
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
@@ -4326,7 +4329,7 @@ app.put('/api/instances/:id/agents/:agentId', (req, res) => {
   }
 
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) {
       return res.status(404).json({ error: '配置文件不存在' })
     }
@@ -4405,7 +4408,7 @@ app.delete('/api/instances/:id/agents/:agentId', (req, res) => {
   }
 
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) {
       return res.status(404).json({ error: '配置文件不存在' })
     }
@@ -4529,7 +4532,7 @@ app.get('/api/sessions/active', (req, res) => {
 
 app.get('/api/settings', (req, res) => {
   const settings = loadSettings()
-  settings.data = { ...settings.data, dataDir: path.join(os.homedir(), '.stepclaw') }
+  settings.data = { ...settings.data, dataDir: path.join(os.homedir(), 'Lingshu') }
   try {
     let cacheSize = 0
     const walkDir = (dir) => {

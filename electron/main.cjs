@@ -203,8 +203,8 @@ ipcMain.handle('execute-skill', async (event, skillName, params = '') => {
   return new Promise((resolve, reject) => {
     const env = {
       ...process.env,
-      OPENCLAW_STATE_DIR: path.join(os.homedir(), '.stepclaw'),
-      PATH: `${path.join(os.homedir(), '.stepclaw', 'bin')}:${process.env.PATH}`
+      OPENCLAW_STATE_DIR: path.join(os.homedir(), 'Lingshu'),
+      PATH: `${path.join(os.homedir(), 'Lingshu', 'bin')}:${process.env.PATH}`
     }
     execFile('openclaw', ['skills', 'run', String(skillName), String(params || '')], { env }, (error, stdout, stderr) => {
       if (error) {

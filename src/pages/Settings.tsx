@@ -9,8 +9,10 @@ import {
   ThunderboltOutlined, InfoCircleOutlined, ExportOutlined,
   ImportOutlined, DeleteOutlined, ClearOutlined, KeyOutlined,
   GlobalOutlined, CheckCircleOutlined, ExclamationCircleOutlined,
-  SaveOutlined, FolderOpenOutlined, SearchOutlined
+  SaveOutlined, FolderOpenOutlined, SearchOutlined,
+  GithubOutlined, BugOutlined, SyncOutlined
 } from '@ant-design/icons'
+import { openExternal } from '../utils/electron'
 import { PROVIDERS } from './ModelConfig'
 import { useSettings } from '../contexts/SettingsContext'
 
@@ -560,7 +562,7 @@ const Settings: React.FC = () => {
           <Input
             value={agentWorkspace}
             onChange={e => setAgentWorkspace(e.target.value)}
-            placeholder="例如：/Users/xxx/.stepclaw/workspace"
+            placeholder="例如：/Users/xxx/Lingshu/workspace"
             style={{ fontFamily: 'monospace' }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -863,9 +865,31 @@ const Settings: React.FC = () => {
             <RobotOutlined style={{ fontSize: 48, color: '#1890ff' }} />
             <div>
               <Title level={3} style={{ margin: 0 }}>灵枢</Title>
-              <Tag color="blue">v1.0.0</Tag>
+              <Tag color="blue">v1.1.0</Tag>
             </div>
           </div>
+          <Divider />
+          <Space>
+            <Button
+              type="primary"
+              icon={<SyncOutlined />}
+              onClick={() => message.info('当前已是最新版本 v1.1.0')}
+            >
+              检查更新
+            </Button>
+            <Button
+              icon={<GithubOutlined />}
+              onClick={() => openExternal('https://github.com/lingshu-ai/lingshu')}
+            >
+              GitHub
+            </Button>
+            <Button
+              icon={<BugOutlined />}
+              onClick={() => openExternal('https://github.com/lingshu-ai/lingshu/issues')}
+            >
+              问题反馈
+            </Button>
+          </Space>
           <Divider />
           <div>
             <Text strong>技术栈</Text>

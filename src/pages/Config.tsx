@@ -37,7 +37,7 @@ const Config: React.FC = () => {
         }
         const skills = {
           autoUpdate: config.skills?.autoUpdate !== undefined ? config.skills.autoUpdate : true,
-          loadPath: config.skills?.load?.extraDirs?.[0] || config.skills?.loadPath || '~/.stepclaw/skills'
+          loadPath: config.skills?.load?.extraDirs?.[0] || config.skills?.loadPath || '~/Lingshu/skills'
         }
 
         form.setFieldsValue({ ...general, ...models, ...channels, ...skills, rawJson: JSON.stringify(config, null, 2) })

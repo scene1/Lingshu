@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3005
 app.use(cors())
 app.use(express.json())
 
-const DATA_DIR = path.join(os.homedir(), '.stepclaw', 'workspace', 'openclaw-web-ui-data')
+const DATA_DIR = path.join(os.homedir(), 'Lingshu', 'workspace', 'openclaw-web-ui-data')
 const INSTANCES_FILE = path.join(DATA_DIR, 'instances.json')
 const CHAT_DIR = path.join(DATA_DIR, 'chat-history')
 
@@ -23,12 +23,12 @@ if (!fs.existsSync(CHAT_DIR)) fs.mkdirSync(CHAT_DIR, { recursive: true })
 const DEFAULT_INSTANCES = [
   {
     id: 'local', name: '本地灵枢运行时', type: 'local', status: 'connected',
-    configPath: '~/.stepclaw/openclaw.json', workspacePath: '~/.stepclaw/workspace',
+    configPath: '~/Lingshu/openclaw.json', workspacePath: '~/Lingshu/workspace',
     description: '当前机器上的灵枢运行实例', lastConnected: new Date().toISOString()
   },
   {
     id: 'agent-desktop', name: 'Agent 桌面端', type: 'agent-desktop', status: 'disconnected',
-    configPath: '~/.stepclaw/openclaw.json', workspacePath: '~/.stepclaw/workspace',
+    configPath: '~/Lingshu/openclaw.json', workspacePath: '~/Lingshu/workspace',
     description: '本机 Agent 桌面端连接', lastConnected: ''
   }
 ]
@@ -93,12 +93,12 @@ function findSkillMd(dirPath) {
 function collectSkills() {
   const skillsMap = new Map()
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) return []
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
     const extraDirs = config?.skills?.load?.extraDirs || []
     // 始终包含用户 skills 目录
-    const userSkillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+    const userSkillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
     if (fs.existsSync(userSkillsDir) && !extraDirs.includes(userSkillsDir)) {
       extraDirs.push(userSkillsDir)
     }
@@ -248,8 +248,8 @@ app.post('/api/instances/:id/restart', (req, res) => {
 app.get('/api/instances/:id/logs', (req, res) => {
   try {
     const logPaths = [
-      path.join(os.homedir(), '.stepclaw', 'logs', 'openclaw.log'),
-      path.join(os.homedir(), '.stepclaw', 'logs', 'gateway.log')
+      path.join(os.homedir(), 'Lingshu', 'logs', 'openclaw.log'),
+      path.join(os.homedir(), 'Lingshu', 'logs', 'gateway.log')
     ]
     const logEntries = []
     for (const logPath of logPaths) {
@@ -281,8 +281,8 @@ app.get('/api/instances/:id/logs', (req, res) => {
 app.get('/api/logs', (req, res) => {
   try {
     const logPaths = [
-      path.join(os.homedir(), '.stepclaw', 'logs', 'openclaw.log'),
-      path.join(os.homedir(), '.stepclaw', 'logs', 'gateway.log')
+      path.join(os.homedir(), 'Lingshu', 'logs', 'openclaw.log'),
+      path.join(os.homedir(), 'Lingshu', 'logs', 'gateway.log')
     ]
     const logEntries = []
     for (const logPath of logPaths) {
@@ -313,8 +313,8 @@ app.get('/api/logs', (req, res) => {
 // DELETE /api/logs — 清空日志文件（C-03 fix）
 app.delete('/api/logs', (req, res) => {
   const logPaths = [
-    path.join(os.homedir(), '.stepclaw', 'logs', 'openclaw.log'),
-    path.join(os.homedir(), '.stepclaw', 'logs', 'gateway.log')
+    path.join(os.homedir(), 'Lingshu', 'logs', 'openclaw.log'),
+    path.join(os.homedir(), 'Lingshu', 'logs', 'gateway.log')
   ]
   let clearedFiles = 0
   for (const logPath of logPaths) {
@@ -330,7 +330,7 @@ app.delete('/api/logs', (req, res) => {
 
 // GET /api/config（兼容旧版）
 app.get('/api/config', (req, res) => {
-  const localInstance = instances.find(i => i.id === 'local')
+  const localInstance = instances.find(i => i.id === 'local') || DEFAULT_INSTANCES.find(i => i.id === 'local')
   if (!localInstance) return res.status(404).json({ error: '本地实例不存在' })
   try {
     const configPath = localInstance.configPath.replace('~', os.homedir())
@@ -343,7 +343,7 @@ app.get('/api/config', (req, res) => {
 
 // POST /api/config（兼容旧版）
 app.post('/api/config', (req, res) => {
-  const localInstance = instances.find(i => i.id === 'local')
+  const localInstance = instances.find(i => i.id === 'local') || DEFAULT_INSTANCES.find(i => i.id === 'local')
   if (!localInstance) return res.status(404).json({ error: '本地实例不存在' })
   try {
     const configPath = localInstance.configPath.replace('~', os.homedir())
@@ -356,7 +356,7 @@ app.post('/api/config', (req, res) => {
 
 // PUT /api/config/providers/:providerId — PATCH 语义，仅更新单个 provider
 app.put('/api/config/providers/:providerId', (req, res) => {
-  const localInstance = instances.find(i => i.id === 'local')
+  const localInstance = instances.find(i => i.id === 'local') || DEFAULT_INSTANCES.find(i => i.id === 'local')
   if (!localInstance) return res.status(404).json({ error: '本地实例不存在' })
   try {
     const configPath = localInstance.configPath.replace('~', os.homedir())
@@ -602,7 +602,7 @@ app.post('/api/config/test-provider', (req, res) => {
 
 // 文件上传（M-01 fix：支持 multipart 上传替代 base64 嵌入）
 const multer = require('multer')
-const uploadDir = path.join(os.homedir(), '.stepclaw', 'chat-attachments')
+const uploadDir = path.join(os.homedir(), 'Lingshu', 'chat-attachments')
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true })
 const storage = multer.diskStorage({
   destination: uploadDir,
@@ -691,7 +691,7 @@ app.post('/api/instances/:instanceId/sessions/:sessionId/chat', async (req, res)
   const instance = instances.find(i => i.id === instanceId)
   if (!instance) return res.status(404).json({ error: '实例不存在' })
 
-  const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+  const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
 
   const filePath = path.join(CHAT_DIR, instanceId, `${sessionId}.json`)
@@ -913,7 +913,7 @@ else:
 
 app.get('/api/skills', (req, res) => {
   try {
-    const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+    const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
     const skills = []
     if (fs.existsSync(skillsDir)) {
       const entries = fs.readdirSync(skillsDir, { withFileTypes: true })
@@ -948,7 +948,7 @@ app.get('/api/skills', (req, res) => {
 
 app.get('/api/instances/:id/skills', (req, res) => {
   try {
-    const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+    const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
     const skills = []
     if (fs.existsSync(skillsDir)) {
       const entries = fs.readdirSync(skillsDir, { withFileTypes: true })
@@ -968,12 +968,12 @@ app.get('/api/instances/:id/skills', (req, res) => {
 })
 
 // POST /api/skills/install — 安装 Skill（支持输入名称/URL + 文件上传）
-const skillsUpload = multer({ dest: path.join(os.homedir(), '.stepclaw', 'tmp') })
+const skillsUpload = multer({ dest: path.join(os.homedir(), 'Lingshu', 'tmp') })
 app.post('/api/skills/install', skillsUpload.single('file'), (req, res) => {
   try {
     const input = req.body.input || ''
     const file = req.file
-    const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+    const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
 
     // 如果上传了文件，解压到 skills 目录
     if (file) {
@@ -1016,7 +1016,7 @@ app.post('/api/skills/install', skillsUpload.single('file'), (req, res) => {
     }
 
     // 内置 skill 名称
-    const skillPath = path.join(os.homedir(), '.stepclaw', 'skills', input)
+    const skillPath = path.join(os.homedir(), 'Lingshu', 'skills', input)
     if (fs.existsSync(skillPath)) return res.status(409).json({ error: 'Skill 已存在' })
 
     // 检查内置 skills 模板
@@ -1048,7 +1048,7 @@ app.post('/api/instances/:id/skills/:skillName/execute', (req, res) => {
     return res.status(403).json({ error: '只有本地运行时或 Agent 桌面端可以执行技能' })
   }
   const { params = '' } = req.body
-  const command = `export OPENCLAW_STATE_DIR=${os.homedir()}/.stepclaw && export PATH=${os.homedir()}/.stepclaw/bin:$PATH && openclaw skills run ${req.params.skillName} "${params}"`
+  const command = `export OPENCLAW_STATE_DIR=${os.homedir()}/Lingshu && export PATH=${os.homedir()}/Lingshu/bin:$PATH && openclaw skills run ${req.params.skillName} "${params}"`
   exec(command, (error, stdout, stderr) => {
     if (error) {
       console.error('Skill 执行失败:', error)
@@ -1061,7 +1061,7 @@ app.post('/api/instances/:id/skills/:skillName/execute', (req, res) => {
 
 // DELETE /api/skills/:id — 卸载 skill（C-01 fix）
 app.delete('/api/skills/:id', (req, res) => {
-  const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+  const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
   const skillDir = path.join(skillsDir, req.params.id)
   if (!fs.existsSync(skillDir)) return res.status(404).json({ error: 'Skill 不存在' })
   try {
@@ -1074,10 +1074,10 @@ app.delete('/api/skills/:id', (req, res) => {
 
 // POST /api/skills/:id/reload — 重新加载 skill（C-02 fix）
 app.post('/api/skills/:id/reload', (req, res) => {
-  const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+  const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
   const skillDir = path.join(skillsDir, req.params.id)
   if (!fs.existsSync(skillDir)) return res.status(404).json({ error: 'Skill 不存在' })
-  exec(`export OPENCLAW_STATE_DIR=${os.homedir()}/.stepclaw && export PATH=${os.homedir()}/.stepclaw/bin:$PATH && openclaw skills reload ${req.params.id}`, (error, stdout, stderr) => {
+  exec(`export OPENCLAW_STATE_DIR=${os.homedir()}/Lingshu && export PATH=${os.homedir()}/Lingshu/bin:$PATH && openclaw skills reload ${req.params.id}`, (error, stdout, stderr) => {
     if (error) {
       res.status(500).json({ success: false, error: error.message, stderr })
     } else {
@@ -1145,7 +1145,7 @@ app.get('/api/system/stats', (req, res) => {
 
 app.get('/api/dashboard/stats', (req, res) => {
   try {
-    const skillsDir = path.join(os.homedir(), '.stepclaw', 'skills')
+    const skillsDir = path.join(os.homedir(), 'Lingshu', 'skills')
     let totalSkills = 0, activeSkills = 0
     if (fs.existsSync(skillsDir)) {
       const entries = fs.readdirSync(skillsDir, { withFileTypes: true })
@@ -1224,7 +1224,7 @@ app.get('/api/dashboard/activity', (req, res) => {
 
 function loadAgentsFromConfig() {
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) return null
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
     if (config.agents) {
@@ -1272,7 +1272,7 @@ app.get('/api/instances/:id/agents', (req, res) => {
 app.put('/api/instances/:id/agents/:agentId', (req, res) => {
   if (!instances.find(i => i.id === req.params.id)) return res.status(404).json({ error: '实例不存在' })
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) return res.status(404).json({ error: '配置文件不存在' })
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
     let found = false
@@ -1309,7 +1309,7 @@ app.put('/api/instances/:id/agents/:agentId', (req, res) => {
 app.post('/api/instances/:id/agents', (req, res) => {
   if (!instances.find(i => i.id === req.params.id)) return res.status(404).json({ error: '实例不存在' })
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) return res.status(404).json({ error: '配置文件不存在' })
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
     // 确保 agents 和 agents.list 结构存在
@@ -1341,7 +1341,7 @@ app.post('/api/instances/:id/agents/:agentId/stop', (req, res) => {
 app.delete('/api/instances/:id/agents/:agentId', (req, res) => {
   if (!instances.find(i => i.id === req.params.id)) return res.status(404).json({ error: '实例不存在' })
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) return res.status(404).json({ error: '配置文件不存在' })
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
     let found = false
@@ -1924,7 +1924,7 @@ app.post('/api/group-chat', async (req, res) => {
   }
   if (!message) return res.status(400).json({ error: '消息不能为空' })
 
-  const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+  const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
   const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {}
 
   const getProviderConfig = (providerId) => {
@@ -2120,7 +2120,7 @@ function saveSettings(settings) {
 app.get('/api/settings', (req, res) => {
   const settings = loadSettings()
   // dataDir 始终返回，不受缓存计算是否成功影响
-  settings.data = { ...settings.data, dataDir: path.join(os.homedir(), '.stepclaw') }
+  settings.data = { ...settings.data, dataDir: path.join(os.homedir(), 'Lingshu') }
   // 计算缓存大小：扫描整个数据目录
   try {
     let cacheSize = 0
@@ -2274,7 +2274,7 @@ const KNOWN_PROVIDERS = {
 // 只展示用户已在模型配置中配置过的厂商的模型；已配置的厂商会展开其全部已知模型
 app.get('/api/models', (req, res) => {
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     let config = {}
     if (fs.existsSync(configPath)) {
       config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
@@ -2339,7 +2339,7 @@ app.get('/api/models', (req, res) => {
 app.post('/api/channels/:id/test', async (req, res) => {
   const channelId = req.params.id
   try {
-    const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+    const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
     if (!fs.existsSync(configPath)) {
       return res.status(400).json({ success: false, error: '未找到 openclaw.json 配置文件' })
     }
@@ -2414,7 +2414,7 @@ app.post('/api/channels/:id/test', async (req, res) => {
 // 让 Claude Code CLI 可以把 ANTHROPIC_BASE_URL 指向本服务，
 // 所有请求经由此处统一转发到真实上游，共享同一通道。
 app.use('/v1', (req, res) => {
-  const configPath = path.join(os.homedir(), '.stepclaw', 'openclaw.json')
+  const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
   let upstreamBase = 'http://192.168.51.10:8080'
   let upstreamKey = null
   try {
