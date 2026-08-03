@@ -96,6 +96,16 @@ interface SelfCheck {
   checks: SelfCheckItem[]
 }
 
+interface SearchIndexStatus {
+  available: boolean
+  reason?: string
+  dbPath?: string
+  indexedCount: number
+  vaultCount?: number
+  staleCount?: number
+  lastIndexedAt?: string
+}
+
 const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [stats, setStats] = useState<SystemStats | null>(null)
@@ -105,6 +115,8 @@ const Dashboard: React.FC = () => {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [logStats, setLogStats] = useState({ total: 0, info: 0, warn: 0, error: 0 })
   const [selfCheck, setSelfCheck] = useState<SelfCheck | null>(null)
+  const [searchIndexStatus, setSearchIndexStatus] = useState<SearchIndexStatus | null>(null)
+  const [rebuildingSearchIndex, setRebuildingSearchIndex] = useState(false)
   const [currentTime, setCurrentTime] = useState(new Date())
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -162,12 +174,39 @@ const Dashboard: React.FC = () => {
       if (selfCheckRes.ok) {
         setSelfCheck(await selfCheckRes.json())
       }
+
+      const searchIndexRes = await fetch('/api/documents/index/status')
+      if (searchIndexRes.ok) {
+        setSearchIndexStatus(await searchIndexRes.json())
+      }
     } catch (error) {
       console.error('加载数据失败:', error)
     } finally {
       setLoading(false)
     }
   }, [])
+
+  const rebuildSearchIndex = useCallback(async () => {
+    setRebuildingSearchIndex(true)
+    try {
+      const res = await fetch('/api/documents/index/rebuild', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true, maxFiles: 10000 })
+      })
+      const data = await res.json()
+      if (!res.ok || data.success === false) {
+        throw new Error(data.error || data.reason || '重建知识库索引失败')
+      }
+      setSearchIndexStatus(data.status || null)
+      message.success(`索引已重建：更新 ${data.indexed || 0}，跳过 ${data.skipped || 0}，删除 ${data.deleted || 0}`)
+      loadDashboardData()
+    } catch (error: any) {
+      message.error(error.message || '重建知识库索引失败')
+    } finally {
+      setRebuildingSearchIndex(false)
+    }
+  }, [loadDashboardData])
 
   useEffect(() => {
     loadDashboardData()
@@ -434,6 +473,44 @@ const Dashboard: React.FC = () => {
                 </List.Item>
               )}
             />
+            <Card size="small" style={{ marginTop: 16 }} bodyStyle={{ padding: 12 }}>
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Space wrap>
+                    <DatabaseOutlined style={{ color: '#1890ff' }} />
+                    <Text strong>Markdown 搜索索引</Text>
+                    <Tag color={searchIndexStatus?.available ? 'success' : 'warning'}>
+                      {searchIndexStatus?.available ? 'SQLite FTS5 可用' : '未就绪'}
+                    </Tag>
+                    {typeof searchIndexStatus?.staleCount === 'number' && searchIndexStatus.staleCount > 0 && (
+                      <Tag color="orange">待更新 {searchIndexStatus.staleCount}</Tag>
+                    )}
+                  </Space>
+                  <Button
+                    size="small"
+                    icon={<SyncOutlined spin={rebuildingSearchIndex} />}
+                    loading={rebuildingSearchIndex}
+                    onClick={rebuildSearchIndex}
+                  >
+                    重建索引
+                  </Button>
+                </Space>
+                {searchIndexStatus ? (
+                  <Space size="middle" wrap>
+                    <Text type="secondary">已索引：{searchIndexStatus.indexedCount || 0}</Text>
+                    <Text type="secondary">Vault 文件：{searchIndexStatus.vaultCount || 0}</Text>
+                    <Text type="secondary">
+                      最近更新：{searchIndexStatus.lastIndexedAt ? new Date(searchIndexStatus.lastIndexedAt).toLocaleString('zh-CN') : '未记录'}
+                    </Text>
+                    <Text type={searchIndexStatus.available ? 'secondary' : 'warning'} ellipsis={{ tooltip: searchIndexStatus.reason || searchIndexStatus.dbPath || '-' }}>
+                      {searchIndexStatus.reason || searchIndexStatus.dbPath || '-'}
+                    </Text>
+                  </Space>
+                ) : (
+                  <Text type="secondary">正在读取索引状态…</Text>
+                )}
+              </Space>
+            </Card>
           </>
         ) : (
           <Alert

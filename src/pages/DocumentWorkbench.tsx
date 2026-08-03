@@ -79,6 +79,18 @@ interface DocumentSearchResult {
   score: number
 }
 
+interface DocumentSearchMeta {
+  engine?: string
+  indexError?: string
+  index?: {
+    indexed?: number
+    skipped?: number
+    deleted?: number
+    total?: number
+    dbPath?: string
+  }
+}
+
 interface DocumentPropertyResult {
   title: string
   path: string
@@ -485,6 +497,7 @@ const DocumentWorkbench: React.FC = () => {
   const [newTitle, setNewTitle] = useState('')
   const [searchText, setSearchText] = useState('')
   const [searchResults, setSearchResults] = useState<DocumentSearchResult[]>([])
+  const [searchMeta, setSearchMeta] = useState<DocumentSearchMeta | null>(null)
   const [searchingDocuments, setSearchingDocuments] = useState(false)
   const [propertyDocuments, setPropertyDocuments] = useState<DocumentPropertyResult[]>([])
   const [propertyTagFacets, setPropertyTagFacets] = useState<DocumentPropertyFacet[]>([])
@@ -659,6 +672,7 @@ const DocumentWorkbench: React.FC = () => {
     const cleanQuery = query.trim()
     if (!cleanQuery) {
       setSearchResults([])
+      setSearchMeta(null)
       setSearchingDocuments(false)
       return
     }
@@ -666,9 +680,15 @@ const DocumentWorkbench: React.FC = () => {
     try {
       const data = await apiJson(`/api/documents/search?q=${encodeURIComponent(cleanQuery)}&limit=16`)
       setSearchResults(Array.isArray(data.results) ? data.results : [])
+      setSearchMeta({
+        engine: data.engine,
+        indexError: data.indexError,
+        index: data.index
+      })
     } catch (error: any) {
       message.warning(error.message)
       setSearchResults([])
+      setSearchMeta(null)
     } finally {
       setSearchingDocuments(false)
     }
@@ -1689,6 +1709,23 @@ const DocumentWorkbench: React.FC = () => {
                   {searchText.trim() && (
                     <div className="document-search-results">
                       <Spin spinning={searchingDocuments}>
+                        {searchMeta && (
+                          <div className="document-search-meta">
+                            <Space size={6} wrap>
+                              <Tag color={searchMeta.engine === 'sqlite-fts5' ? 'success' : 'orange'}>
+                                {searchMeta.engine === 'sqlite-fts5' ? 'SQLite FTS5' : '回退扫描'}
+                              </Tag>
+                              {searchMeta.index && (
+                                <Text type="secondary">
+                                  索引同步：更新 {searchMeta.index.indexed || 0} / 跳过 {searchMeta.index.skipped || 0} / 总 {searchMeta.index.total || 0}
+                                </Text>
+                              )}
+                              {searchMeta.indexError && (
+                                <Text type="warning">索引异常：{searchMeta.indexError}</Text>
+                              )}
+                            </Space>
+                          </div>
+                        )}
                         {searchResults.length > 0 ? (
                           <List
                             size="small"

@@ -270,6 +270,12 @@ body {
   background: #fbfcfe;
 }
 
+.document-search-meta {
+  margin-bottom: 6px;
+  padding: 4px 2px 8px;
+  border-bottom: 1px dashed #e7ebf1;
+}
+
 .document-search-result {
   padding: 8px !important;
   border-radius: 5px;
