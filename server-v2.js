@@ -196,6 +196,106 @@ function findExecutableOnPath(commandName) {
   return ''
 }
 
+const CLAUDE_CLI_MODEL_ALIASES = [
+  { id: 'sonnet', name: 'Sonnet [claude-sonnet-5]' },
+  { id: 'opus', name: 'Opus [claude-opus-4-8]' },
+  { id: 'haiku', name: 'Haiku [claude-haiku-4-5]' },
+  { id: 'fable', name: 'Fable [claude-fable-5]' }
+]
+
+function getClaudeCliCandidates() {
+  const candidates = [
+    process.env.CLAUDE_CLI_BIN,
+    findExecutableOnPath('claude'),
+    path.join(os.homedir(), '.claude', 'local', 'claude'),
+    path.join(os.homedir(), '.npm-global', 'bin', 'claude'),
+    path.join(os.homedir(), '.local', 'bin', 'claude'),
+    '/opt/homebrew/bin/claude',
+    '/usr/local/bin/claude',
+    '/usr/local/bin/claude.cmd',
+    path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'claude.cmd'),
+    path.join(os.homedir(), '.claude', 'local', 'claude.exe')
+  ].filter(Boolean)
+  return [...new Set(candidates)]
+}
+
+function getClaudeCliStatus() {
+  for (const candidate of getClaudeCliCandidates()) {
+    try {
+      const expanded = String(candidate).replace('~', os.homedir())
+      if (fs.existsSync(expanded) && fs.statSync(expanded).isFile()) {
+        return { available: true, path: expanded, candidates: getClaudeCliCandidates() }
+      }
+    } catch (_) {}
+  }
+  return { available: false, path: '', candidates: getClaudeCliCandidates() }
+}
+
+function formatClaudeCliPrompt(messages = []) {
+  const userMessages = messages.filter(message => message.role !== 'system')
+  return userMessages.map(message => {
+    const role = message.role === 'assistant' ? 'Assistant' : 'User'
+    return `${role}: ${message.content || ''}`
+  }).join('\n\n')
+}
+
+function parseClaudeCliJsonOutput(output = '') {
+  const trimmed = String(output || '').trim()
+  if (!trimmed) return ''
+  try {
+    const parsed = JSON.parse(trimmed)
+    return parsed.result || parsed.response || parsed.content || parsed.message?.content || parsed.text || ''
+  } catch (_) {}
+  const jsonLine = trimmed.split(/\r?\n/).reverse().find(line => line.trim().startsWith('{') && line.trim().endsWith('}'))
+  if (jsonLine) {
+    try {
+      const parsed = JSON.parse(jsonLine)
+      return parsed.result || parsed.response || parsed.content || parsed.message?.content || parsed.text || ''
+    } catch (_) {}
+  }
+  return trimmed
+}
+
+async function callClaudeCli({ model, messages, options = {} }) {
+  const status = getClaudeCliStatus()
+  if (!status.available) {
+    return { success: false, statusCode: 404, error: 'Claude CLI 未安装或不在可检测路径中', data: { raw: status } }
+  }
+
+  const systemPrompt = messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n')
+  const prompt = formatClaudeCliPrompt(messages)
+  const args = ['-p', '--model', String(model || 'sonnet'), '--output-format', 'json']
+  if (systemPrompt) args.push('--system-prompt', systemPrompt)
+
+  return new Promise(resolve => {
+    const child = spawn(status.path, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: `${path.dirname(status.path)}:${process.env.PATH || ''}` }
+    })
+    let stdout = ''
+    let stderr = ''
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM')
+      resolve({ success: false, statusCode: 408, error: 'Claude CLI 执行超时', data: { raw: { stdout, stderr } } })
+    }, Number(options.timeoutMs || 120000))
+    child.stdout.on('data', chunk => { stdout += chunk.toString() })
+    child.stderr.on('data', chunk => { stderr += chunk.toString() })
+    child.on('error', error => {
+      clearTimeout(timeout)
+      resolve({ success: false, statusCode: 500, error: `Claude CLI 启动失败：${error.message}`, data: { raw: { stdout, stderr } } })
+    })
+    child.on('close', code => {
+      clearTimeout(timeout)
+      if (code !== 0) {
+        resolve({ success: false, statusCode: 500, error: stderr.trim() || `Claude CLI 退出码 ${code}`, data: { raw: { stdout, stderr } } })
+        return
+      }
+      resolve({ success: true, statusCode: 200, data: { text: parseClaudeCliJsonOutput(stdout), raw: { stdout, stderr } } })
+    })
+    child.stdin.end(prompt || 'Hi')
+  })
+}
+
 function detectAgentInvocationCapabilities(appInfo) {
   const displayName = String(appInfo.displayName || appInfo.name || '').toLowerCase()
   const bundleId = String(appInfo.bundleId || '').toLowerCase()
@@ -2258,6 +2358,7 @@ function readToolRuntimeAudit(limit = 200) {
 }
 
 function hasApiKey(config, providerId) {
+  if (providerId === 'claude-cli') return getClaudeCliStatus().available
   if (config.providers?.[providerId]?.apiKey) return true
   if (config.models?.providers?.[providerId]?.apiKey) return true
   return false
@@ -2303,6 +2404,10 @@ const KNOWN_PROVIDERS = {
       { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5 - 经典版本' },
       { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 - 极速响应' },
     ]
+  },
+  'claude-cli': {
+    name: 'Claude CLI (本地命令行)', baseUrl: 'local://claude-cli',
+    models: CLAUDE_CLI_MODEL_ALIASES
   },
   doubao: {
     name: '豆包 (火山引擎)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
@@ -2352,6 +2457,10 @@ async function callProviderAI({ provider, apiKey, baseUrl, model, messages, opti
   const cleanBaseUrl = String(baseUrl || '').replace(/\/+$/, '')
   const maxTokens = options.maxTokens || 4000
   const temperature = options.temperature ?? 0.7
+
+  if (provider === 'claude-cli') {
+    return callClaudeCli({ model, messages, options })
+  }
 
   if (provider === 'anthropic') {
     const systemMessages = messages.filter(m => m.role === 'system')
@@ -3086,8 +3195,31 @@ app.put('/api/config/providers/:providerId', (req, res) => {
   }
 })
 
+app.get('/api/claude-cli/status', (req, res) => {
+  res.json(getClaudeCliStatus())
+})
+
 app.post('/api/config/test-provider', async (req, res) => {
   const { baseUrl, apiKey, model, provider } = req.body || {}
+  if (provider === 'claude-cli') {
+    const requestedModel = model || 'sonnet'
+    const testMessageResult = await callProviderAI({
+      provider,
+      apiKey: '',
+      baseUrl: '',
+      model: requestedModel,
+      messages: [{ role: 'user', content: 'Hi' }],
+      options: { maxTokens: 20, timeoutMs: 120000 }
+    })
+    return res.status(testMessageResult.success ? 200 : 500).json({
+      success: testMessageResult.success,
+      message: testMessageResult.success ? '连接成功' : (testMessageResult.error || '连接失败'),
+      claudeCli: getClaudeCliStatus(),
+      testMessageResult: testMessageResult.success
+        ? { status: 'ok', reply: testMessageResult.data.text }
+        : { status: 'error', statusCode: testMessageResult.statusCode, error: testMessageResult.error }
+    })
+  }
   if (!baseUrl || !apiKey) return res.status(400).json({ success: false, error: '缺少 baseUrl 或 apiKey' })
 
   try {
@@ -3624,6 +3756,11 @@ app.post('/api/instances/:instanceId/sessions/:sessionId/chat', async (req, res)
         apiKey = route.settings.apiKey
         baseUrl = route.settings.baseUrl
       }
+    } else if (actualProvider === 'claude-cli') {
+      routedProvider = 'claude-cli'
+      routedModel = actualModel || providerConfig?.model || 'sonnet'
+      apiKey = 'local-cli'
+      baseUrl = 'local://claude-cli'
     } else {
       if (config.providers && config.providers[actualProvider]) {
         providerConfig = config.providers[actualProvider]

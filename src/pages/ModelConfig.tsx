@@ -37,6 +37,7 @@ export interface ProviderConfig {
   models: { value: string; label: string; desc: string }[]
   docUrl: string
   keyPlaceholder: string
+  mode?: 'api-key' | 'local-cli'
 }
 
 // 主流模型提供商配置
@@ -101,6 +102,21 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
     ],
     docUrl: 'https://console.anthropic.com/',
     keyPlaceholder: 'sk-ant-xxxxxxxx'
+  },
+  'claude-cli': {
+    id: 'claude-cli',
+    name: 'Claude CLI (本地命令行)',
+    icon: '⚡',
+    baseUrl: 'local://claude-cli',
+    models: [
+      { value: 'sonnet', label: 'Sonnet [claude-sonnet-5]', desc: '平衡性能与速度，日常首选' },
+      { value: 'opus', label: 'Opus [claude-opus-4-8]', desc: '最强推理能力，复杂任务推荐' },
+      { value: 'haiku', label: 'Haiku [claude-haiku-4-5]', desc: '极速响应，轻量任务' },
+      { value: 'fable', label: 'Fable [claude-fable-5]', desc: '旗舰模型别名' },
+    ],
+    docUrl: 'https://docs.anthropic.com/',
+    keyPlaceholder: '无需填写，由 claude CLI 自身管理认证',
+    mode: 'local-cli'
   },
   doubao: {
     id: 'doubao',
@@ -177,6 +193,7 @@ const ModelConfig: React.FC = () => {
   const [configs, setConfigs] = useState<Record<string, any>>({})
   const [loading, setLoading] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [claudeCliStatus, setClaudeCliStatus] = useState<{ available: boolean; path?: string; candidates?: string[] } | null>(null)
 
   // 加载配置
   useEffect(() => {
@@ -186,19 +203,21 @@ const ModelConfig: React.FC = () => {
   // 切换提供商时加载对应配置
   useEffect(() => {
     const config = configs[currentProvider]
+    const provider = PROVIDERS[currentProvider]
     if (config) {
       form.setFieldsValue({
         apiKey: config.apiKey,
-        baseUrl: config.baseUrl || PROVIDERS[currentProvider].baseUrl,
+        baseUrl: config.baseUrl || provider.baseUrl,
         model: config.model
       })
     } else {
       form.setFieldsValue({
         apiKey: '',
-        baseUrl: PROVIDERS[currentProvider].baseUrl,
-        model: PROVIDERS[currentProvider].models[0]?.value
+        baseUrl: provider.baseUrl,
+        model: provider.models[0]?.value
       })
     }
+    if (provider.mode === 'local-cli') loadClaudeCliStatus()
   }, [currentProvider, configs])
 
   const loadConfigs = async () => {
@@ -210,6 +229,18 @@ const ModelConfig: React.FC = () => {
       }
     } catch (error) {
       console.error('加载配置失败:', error)
+    }
+  }
+
+  const loadClaudeCliStatus = async () => {
+    try {
+      const response = await fetch('/api/claude-cli/status')
+      if (response.ok) {
+        setClaudeCliStatus(await response.json())
+      }
+    } catch (error) {
+      console.error('加载 Claude CLI 状态失败:', error)
+      setClaudeCliStatus({ available: false })
     }
   }
 
@@ -230,7 +261,7 @@ const ModelConfig: React.FC = () => {
     
     const result = await response.json()
     if (!result.success) {
-      throw new Error(result.error || `HTTP ${response.status}`)
+      throw new Error(result.error || result.message || `HTTP ${response.status}`)
     }
     
     return true
@@ -239,6 +270,7 @@ const ModelConfig: React.FC = () => {
   // 保存配置
   const handleSave = async () => {
     const values = await form.validateFields()
+    const provider = PROVIDERS[currentProvider]
     setLoading(true)
     
     try {
@@ -248,11 +280,13 @@ const ModelConfig: React.FC = () => {
       
       // 更新 providers
       config.providers = config.providers || {}
-      config.providers[currentProvider] = {
-        apiKey: values.apiKey,
-        baseUrl: values.baseUrl,
-        model: values.model
-      }
+      config.providers[currentProvider] = provider.mode === 'local-cli'
+        ? { apiKey: '', baseUrl: provider.baseUrl, model: values.model, mode: 'local-cli' }
+        : {
+            apiKey: values.apiKey,
+            baseUrl: values.baseUrl,
+            model: values.model
+          }
       
       // 保存
       const saveResponse = await fetch('/api/config', {
@@ -306,6 +340,7 @@ const ModelConfig: React.FC = () => {
   }))
 
   const currentConfig = PROVIDERS[currentProvider]
+  const isLocalCliProvider = currentConfig.mode === 'local-cli'
 
   return (
     <Layout style={{ minHeight: '100vh', background: '#f5f5f5' }}>
@@ -340,7 +375,13 @@ const ModelConfig: React.FC = () => {
             <Space>
               <span style={{ fontSize: 24 }}>{currentConfig.icon}</span>
               <Title level={4} style={{ margin: 0 }}>{currentConfig.name}</Title>
-              {configs[currentProvider]?.apiKey && (
+              {isLocalCliProvider && claudeCliStatus?.available && (
+                <Tag color="success" icon={<CheckCircleOutlined />}>CLI 已安装</Tag>
+              )}
+              {isLocalCliProvider && claudeCliStatus && !claudeCliStatus.available && (
+                <Tag color="error">CLI 未安装</Tag>
+              )}
+              {!isLocalCliProvider && configs[currentProvider]?.apiKey && (
                 <Tag color="success" icon={<CheckCircleOutlined />}>已配置</Tag>
               )}
             </Space>
@@ -352,19 +393,32 @@ const ModelConfig: React.FC = () => {
               href={currentConfig.docUrl}
               target="_blank"
             >
-              获取 API Key
+              {isLocalCliProvider ? '查看文档' : '获取 API Key'}
             </Button>
           }
           style={{ maxWidth: 800 }}
         >
           {/* 配置说明 */}
-          <Alert
-            message="配置说明"
-            description={`在 ${currentConfig.docUrl} 注册账号并创建 API Key，填入下方配置。支持 ${currentConfig.models.length} 款模型。`}
-            type="info"
-            showIcon
-            style={{ marginBottom: 24 }}
-          />
+          {isLocalCliProvider ? (
+            <Alert
+              message={claudeCliStatus?.available ? 'Claude CLI 可用' : 'Claude CLI 未检测到'}
+              description={claudeCliStatus?.available
+                ? `已检测到本地 CLI：${claudeCliStatus.path}。灵枢会通过 claude -p 复用 CLI 自身认证，不需要 API Key。`
+                : '请先安装并登录 claude CLI，例如 npm install -g @anthropic-ai/claude-code，然后在终端运行 claude 完成认证。'}
+              type={claudeCliStatus?.available ? 'success' : 'warning'}
+              showIcon
+              action={<Button size="small" onClick={loadClaudeCliStatus}>重新检测</Button>}
+              style={{ marginBottom: 24 }}
+            />
+          ) : (
+            <Alert
+              message="配置说明"
+              description={`在 ${currentConfig.docUrl} 注册账号并创建 API Key，填入下方配置。支持 ${currentConfig.models.length} 款模型。`}
+              type="info"
+              showIcon
+              style={{ marginBottom: 24 }}
+            />
+          )}
 
           <Form
             form={form}
@@ -374,31 +428,35 @@ const ModelConfig: React.FC = () => {
               model: currentConfig.models[0]?.value
             }}
           >
-            {/* API Key */}
-            <Form.Item
-              name="apiKey"
-              label={<Text strong>API Key</Text>}
-              rules={[{ required: true, message: '请输入 API Key' }]}
-            >
-              <Input.Password
-                placeholder={currentConfig.keyPlaceholder}
-                prefix={<KeyOutlined />}
-                size="large"
-              />
-            </Form.Item>
+            {!isLocalCliProvider && (
+              <>
+                {/* API Key */}
+                <Form.Item
+                  name="apiKey"
+                  label={<Text strong>API Key</Text>}
+                  rules={[{ required: true, message: '请输入 API Key' }]}
+                >
+                  <Input.Password
+                    placeholder={currentConfig.keyPlaceholder}
+                    prefix={<KeyOutlined />}
+                    size="large"
+                  />
+                </Form.Item>
 
-            {/* Base URL */}
-            <Form.Item
-              name="baseUrl"
-              label={<Text strong>Base URL</Text>}
-              rules={[{ required: true, message: '请输入 Base URL' }]}
-            >
-              <Input
-                placeholder={currentConfig.baseUrl}
-                prefix={<GlobalOutlined />}
-                size="large"
-              />
-            </Form.Item>
+                {/* Base URL */}
+                <Form.Item
+                  name="baseUrl"
+                  label={<Text strong>Base URL</Text>}
+                  rules={[{ required: true, message: '请输入 Base URL' }]}
+                >
+                  <Input
+                    placeholder={currentConfig.baseUrl}
+                    prefix={<GlobalOutlined />}
+                    size="large"
+                  />
+                </Form.Item>
+              </>
+            )}
 
             {/* 默认模型 */}
             <Form.Item
