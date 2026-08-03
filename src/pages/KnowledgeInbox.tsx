@@ -69,6 +69,9 @@ interface KnowledgeAutomationSource {
   instruction?: string
   enabled: boolean
   tags: string[]
+  token?: string
+  seenKeys?: string[]
+  lastScheduledMinute?: string
   lastRunAt?: string
   lastRunStatus?: string
   lastRunMessage?: string
@@ -278,7 +281,7 @@ const KnowledgeInbox: React.FC = () => {
     }
   }
 
-  const webhookUrl = (source: KnowledgeAutomationSource) => `${window.location.origin}/api/webhooks/knowledge/${source.id}`
+  const webhookUrl = (source: KnowledgeAutomationSource) => `${window.location.origin}/api/webhooks/knowledge/${source.id}${source.token ? `?token=${encodeURIComponent(source.token)}` : ''}`
 
   const processItem = async (item: KnowledgeInboxItem) => {
     try {
@@ -439,7 +442,7 @@ const KnowledgeInbox: React.FC = () => {
         type="info"
         style={{ marginBottom: 16 }}
         message="一期闭环：捕获 → 规则抽取 → 待确认 → 写入 Vault"
-        description="当前先做本地规则抽取摘要、标签和实体，不会自动污染知识库；点击“入库”后才会写入指定 Vault 目录。"
+        description="当前入口支持 RSS 去重、Webhook token 鉴权和 Cron 后台扫描；所有自动捕获内容仍先进入 Inbox，确认后才写入 Vault。"
       />
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -485,8 +488,8 @@ const KnowledgeInbox: React.FC = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="cron" label="Cron">
-                <Input placeholder="0 8 * * *" />
+              <Form.Item name="cron" label="Cron（后台调度，可选）">
+                <Input placeholder="*/30 * * * * 或 0 8 * * *" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -540,6 +543,9 @@ const KnowledgeInbox: React.FC = () => {
                       )}
                       <Space wrap size={4}>
                         {(source.tags || []).map(tag => <Tag key={`${source.id}-${tag}`}>#{tag}</Tag>)}
+                        {source.cron && <Tag color="purple">Cron {source.cron}</Tag>}
+                        {source.type === 'webhook' && source.token && <Tag color="blue">Token 鉴权</Tag>}
+                        {source.type === 'rss' && <Text type="secondary">去重池 {source.seenKeys?.length || 0}</Text>}
                         {source.lastRunAt && <Text type="secondary">上次：{new Date(source.lastRunAt).toLocaleString('zh-CN')}</Text>}
                         {source.lastRunMessage && <Text type="secondary">{source.lastRunMessage}</Text>}
                         <Text type="secondary">累计捕获 {source.capturedCount || 0}</Text>

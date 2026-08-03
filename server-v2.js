@@ -2081,7 +2081,10 @@ function normalizeKnowledgeAutomationSource(input = {}, previous = {}) {
     lastRunAt: previous.lastRunAt || '',
     lastRunStatus: previous.lastRunStatus || '',
     lastRunMessage: previous.lastRunMessage || '',
-    capturedCount: Number(previous.capturedCount || 0)
+    capturedCount: Number(previous.capturedCount || 0),
+    token: String(input.token ?? previous.token ?? (type === 'webhook' ? crypto.randomBytes(16).toString('hex') : '')).trim(),
+    seenKeys: Array.isArray(input.seenKeys) ? input.seenKeys.slice(-500) : (Array.isArray(previous.seenKeys) ? previous.seenKeys.slice(-500) : []),
+    lastScheduledMinute: String(input.lastScheduledMinute || previous.lastScheduledMinute || '')
   }
 }
 
@@ -2110,6 +2113,7 @@ function parseRssItems(xml, maxItems = 12) {
     return {
       title: extractXmlTag(block, 'title') || '未命名 RSS 条目',
       url: linkTag || atomLink,
+      guid: extractXmlTag(block, 'guid') || extractXmlTag(block, 'id'),
       content: [
         extractXmlTag(block, 'description') || extractXmlTag(block, 'summary') || extractXmlTag(block, 'content'),
         extractXmlTag(block, 'pubDate') || extractXmlTag(block, 'updated')
@@ -2126,16 +2130,35 @@ function addKnowledgeInboxItems(items) {
   return nextItems
 }
 
+function knowledgeAutomationItemKey(source, item) {
+  return hashContent([source.id, item.guid, item.url, item.title, item.content].filter(Boolean).join('\n')).slice(0, 40)
+}
+
 async function runKnowledgeAutomationSource(source) {
-  if (!source.enabled) return { ok: false, captured: 0, message: '入口未启用' }
+  if (!source.enabled) return { ok: false, captured: 0, message: '入口未启用', seenKeys: source.seenKeys || [] }
   if (source.type === 'rss') {
-    if (!source.url) return { ok: false, captured: 0, message: 'RSS URL 为空' }
+    if (!source.url) return { ok: false, captured: 0, message: 'RSS URL 为空', seenKeys: source.seenKeys || [] }
     const response = await fetch(source.url, {
       headers: { 'User-Agent': 'Lingshu/1.1 Knowledge Automation' }
     })
     if (!response.ok) throw new Error(`RSS 请求失败：HTTP ${response.status}`)
     const xml = await response.text()
-    const items = parseRssItems(xml, 12).map(item => ({
+    const rawItems = parseRssItems(xml, 20)
+    const seen = new Set(Array.isArray(source.seenKeys) ? source.seenKeys : [])
+    const freshItems = []
+    const freshKeys = []
+    for (const item of rawItems) {
+      const key = knowledgeAutomationItemKey(source, item)
+      if (seen.has(key)) continue
+      seen.add(key)
+      freshKeys.push(key)
+      freshItems.push(item)
+    }
+    const nextSeenKeys = [...freshKeys, ...(Array.isArray(source.seenKeys) ? source.seenKeys : [])].slice(0, 500)
+    if (freshItems.length === 0) {
+      return { ok: true, captured: 0, message: 'RSS 没有新内容', seenKeys: nextSeenKeys }
+    }
+    const items = freshItems.map(item => ({
       title: item.title,
       content: [item.content, item.url ? `来源：${item.url}` : ''].filter(Boolean).join('\n\n'),
       sourceType: 'rss',
@@ -2143,7 +2166,7 @@ async function runKnowledgeAutomationSource(source) {
       tags: normalizeKnowledgeTags([...(source.tags || []), 'rss'])
     }))
     const captured = addKnowledgeInboxItems(items)
-    return { ok: true, captured: captured.length, message: `已捕获 ${captured.length} 条 RSS 内容` }
+    return { ok: true, captured: captured.length, message: `已捕获 ${captured.length} 条 RSS 新内容`, seenKeys: nextSeenKeys }
   }
   if (source.type === 'cron') {
     const captured = addKnowledgeInboxItems([{
@@ -2152,9 +2175,100 @@ async function runKnowledgeAutomationSource(source) {
       sourceType: 'api',
       tags: normalizeKnowledgeTags([...(source.tags || []), 'cron'])
     }])
-    return { ok: true, captured: captured.length, message: '已创建 Cron 手动运行条目' }
+    return { ok: true, captured: captured.length, message: '已创建 Cron 运行条目', seenKeys: source.seenKeys || [] }
   }
-  return { ok: true, captured: 0, message: 'Webhook 入口等待外部 POST 捕获' }
+  return { ok: true, captured: 0, message: 'Webhook 入口等待外部 POST 捕获', seenKeys: source.seenKeys || [] }
+}
+
+const knowledgeAutomationSchedulerState = { timer: null, running: false }
+
+function cronFieldMatches(field, value) {
+  const clean = String(field || '*').trim()
+  if (!clean || clean === '*') return true
+  return clean.split(',').some(part => {
+    const item = part.trim()
+    if (!item) return false
+    const step = item.match(/^\*\/(\d+)$/)
+    if (step) {
+      const size = Math.max(Number(step[1]) || 1, 1)
+      return value % size === 0
+    }
+    const range = item.match(/^(\d+)-(\d+)$/)
+    if (range) return value >= Number(range[1]) && value <= Number(range[2])
+    return Number(item) === value
+  })
+}
+
+function cronMatchesSchedule(cron, date = new Date()) {
+  const parts = String(cron || '').trim().split(/\s+/)
+  if (parts.length !== 5) return false
+  const minute = date.getMinutes()
+  const hour = date.getHours()
+  const day = date.getDate()
+  const month = date.getMonth() + 1
+  const dow = date.getDay()
+  return cronFieldMatches(parts[0], minute)
+    && cronFieldMatches(parts[1], hour)
+    && cronFieldMatches(parts[2], day)
+    && cronFieldMatches(parts[3], month)
+    && cronFieldMatches(parts[4], dow)
+}
+
+function scheduledMinuteKey(date = new Date()) {
+  return date.toISOString().slice(0, 16)
+}
+
+async function runDueKnowledgeAutomations() {
+  if (knowledgeAutomationSchedulerState.running) return
+  knowledgeAutomationSchedulerState.running = true
+  try {
+    const data = loadKnowledgeAutomation()
+    const now = new Date()
+    const minuteKey = scheduledMinuteKey(now)
+    let changed = false
+    for (let index = 0; index < data.sources.length; index++) {
+      const source = data.sources[index]
+      if (!source.enabled || source.type === 'webhook' || !source.cron) continue
+      if (source.lastScheduledMinute === minuteKey) continue
+      if (!cronMatchesSchedule(source.cron, now)) continue
+      try {
+        const result = await runKnowledgeAutomationSource(source)
+        data.sources[index] = {
+          ...source,
+          seenKeys: result.seenKeys || source.seenKeys || [],
+          lastRunAt: new Date().toISOString(),
+          lastRunStatus: result.ok ? 'success' : 'skipped',
+          lastRunMessage: result.message,
+          capturedCount: Number(source.capturedCount || 0) + Number(result.captured || 0),
+          lastScheduledMinute: minuteKey,
+          updatedAt: new Date().toISOString()
+        }
+      } catch (error) {
+        data.sources[index] = {
+          ...source,
+          lastRunAt: new Date().toISOString(),
+          lastRunStatus: 'error',
+          lastRunMessage: error.message,
+          lastScheduledMinute: minuteKey,
+          updatedAt: new Date().toISOString()
+        }
+      }
+      changed = true
+    }
+    if (changed) saveKnowledgeAutomation(data)
+  } finally {
+    knowledgeAutomationSchedulerState.running = false
+  }
+}
+
+function startKnowledgeAutomationScheduler() {
+  if (knowledgeAutomationSchedulerState.timer) return
+  knowledgeAutomationSchedulerState.timer = setInterval(() => {
+    runDueKnowledgeAutomations().catch(error => console.warn('[knowledge-automation] scheduler failed:', error.message))
+  }, 60 * 1000)
+  setTimeout(() => {
+    runDueKnowledgeAutomations().catch(error => console.warn('[knowledge-automation] initial scan failed:', error.message))
+  }, 3000)
 }
 
 function processKnowledgeInboxItem(item) {
@@ -5862,6 +5976,7 @@ app.post('/api/knowledge-automation/:id/run', async (req, res) => {
     const result = await runKnowledgeAutomationSource(data.sources[index])
     data.sources[index] = {
       ...data.sources[index],
+      seenKeys: result.seenKeys || data.sources[index].seenKeys || [],
       lastRunAt: new Date().toISOString(),
       lastRunStatus: result.ok ? 'success' : 'skipped',
       lastRunMessage: result.message,
@@ -5881,6 +5996,9 @@ app.post('/api/webhooks/knowledge/:id', (req, res) => {
     const source = data.sources.find(item => item.id === req.params.id && item.type === 'webhook')
     if (!source) return res.status(404).json({ error: 'Webhook 入口不存在' })
     if (!source.enabled) return res.status(403).json({ error: 'Webhook 入口未启用' })
+    const bearerToken = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+    const providedToken = String(req.query.token || req.headers['x-lingshu-token'] || bearerToken || '')
+    if (source.token && providedToken !== source.token) return res.status(401).json({ error: 'Webhook token 无效' })
     const body = req.body || {}
     const payloadText = typeof body === 'string' ? body : JSON.stringify(body, null, 2)
     const items = addKnowledgeInboxItems([{
@@ -7046,6 +7164,8 @@ if (distPath) {
 }
 
 // ==================== 启动服务器 ====================
+
+startKnowledgeAutomationScheduler()
 
 const httpServer = app.listen(PORT, '127.0.0.1', () => {
   console.log(`🚀 灵枢 App Server running on port ${PORT}`)
