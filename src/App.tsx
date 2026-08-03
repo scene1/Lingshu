@@ -15,6 +15,7 @@ import {
   FileTextOutlined
 } from '@ant-design/icons'
 import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom'
+import packageJson from '../package.json'
 // 路由懒加载：首屏只加载当前页面，其余按需加载
 const RealChat = React.lazy(() => import('./pages/RealChat'))
 const Dashboard = React.lazy(() => import('./pages/Dashboard'))
@@ -31,6 +32,7 @@ const DocumentWorkbench = React.lazy(() => import('./pages/DocumentWorkbench'))
 import { SettingsProvider, useSettings } from './contexts/SettingsContext'
 
 const { Header, Sider, Content } = Layout
+const appVersion = packageJson.version
 
 const AppInner: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false)
@@ -173,7 +175,7 @@ const AppInner: React.FC = () => {
               />
               <h1 style={{ margin: 0, fontSize: 20 }}>灵枢</h1>
             </div>
-            <span className="app-shell-version" style={{ color: '#999' }}>v1.0.0</span>
+            <span className="app-shell-version" style={{ color: '#999' }}>v{appVersion}</span>
           </Header>
           {/* 页面加载指示器 */}
           <Suspense fallback={

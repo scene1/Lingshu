@@ -130,7 +130,7 @@ const CcSwitch: React.FC = () => {
           showIcon
           style={{ marginBottom: 16 }}
           message="内置 CC Switch 路由"
-          description="这里读取 ~/.cc-switch/cc-switch.db 的 openclaw 路由，切换后会同步写入 ~/Lingshu/openclaw.json。"
+          description="这里读取 ~/.cc-switch/cc-switch.db 的灵枢兼容路由，切换后会同步写入 ~/Lingshu/openclaw.json。"
         />
 
         <Space size="middle" wrap style={{ marginBottom: 16 }}>
@@ -146,7 +146,7 @@ const CcSwitch: React.FC = () => {
         </Space>
 
         {status?.currentProvider && (
-          <Card size="small" style={{ marginBottom: 16 }} title="当前 OpenClaw 路由">
+          <Card size="small" style={{ marginBottom: 16 }} title="当前灵枢路由">
             <Descriptions size="small" column={2}>
               <Descriptions.Item label="名称">{status.currentProvider.name}</Descriptions.Item>
               <Descriptions.Item label="协议">{status.currentProvider.api || '-'}</Descriptions.Item>
@@ -160,11 +160,11 @@ const CcSwitch: React.FC = () => {
         )}
 
         <Card
-          title="OpenClaw Providers"
+          title="灵枢兼容 Providers"
           extra={<Input.Search allowClear placeholder="搜索路由、模型或 Base URL" style={{ width: 280 }} onChange={e => setQuery(e.target.value)} />}
         >
           {filteredProviders.length === 0 ? (
-            <Empty description="没有找到 openclaw 路由" />
+            <Empty description="没有找到灵枢兼容路由" />
           ) : (
             <List
               dataSource={filteredProviders}

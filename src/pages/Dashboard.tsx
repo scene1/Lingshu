@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { 
   Layout, 
   Card, 
@@ -76,6 +76,26 @@ interface LogEntry {
   text?: string
 }
 
+interface SelfCheckItem {
+  key: string
+  label: string
+  ok: boolean
+  value?: string
+  path?: string
+}
+
+interface SelfCheck {
+  ok: boolean
+  productName: string
+  version: string
+  commit?: string
+  port: number
+  dataDir: string
+  distPath?: string
+  time: string
+  checks: SelfCheckItem[]
+}
+
 const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [stats, setStats] = useState<SystemStats | null>(null)
@@ -84,7 +104,9 @@ const Dashboard: React.FC = () => {
   const [recentActivity, setRecentActivity] = useState<any[]>([])
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [logStats, setLogStats] = useState({ total: 0, info: 0, warn: 0, error: 0 })
+  const [selfCheck, setSelfCheck] = useState<SelfCheck | null>(null)
   const [currentTime, setCurrentTime] = useState(new Date())
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadDashboardData = useCallback(async () => {
     try {
@@ -135,6 +157,11 @@ const Dashboard: React.FC = () => {
           error: nextLogs.filter((entry: LogEntry) => entry.level === 'error').length
         })
       }
+
+      const selfCheckRes = await fetch('/api/system/self-check')
+      if (selfCheckRes.ok) {
+        setSelfCheck(await selfCheckRes.json())
+      }
     } catch (error) {
       console.error('加载数据失败:', error)
     } finally {
@@ -145,20 +172,21 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     loadDashboardData()
     const interval = setInterval(loadDashboardData, 30000)
+    pollRef.current = interval
     // 页面不可见时暂停轮询，可见时恢复
     const handleVisibility = () => {
       if (document.hidden) {
-        clearInterval(interval)
+        if (pollRef.current) clearInterval(pollRef.current)
+        pollRef.current = null
       } else {
         loadDashboardData()
-        // eslint-disable-next-line @typescript-eslint/no-use-before-define
-        pollRef.current = setInterval(loadDashboardData, 30000)
+        if (!pollRef.current) pollRef.current = setInterval(loadDashboardData, 30000)
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => {
-      clearInterval(interval)
       if (pollRef.current) clearInterval(pollRef.current)
+      pollRef.current = null
       document.removeEventListener('visibilitychange', handleVisibility)
     }
   }, [loadDashboardData])
@@ -167,8 +195,6 @@ const Dashboard: React.FC = () => {
     const timer = setInterval(() => setCurrentTime(new Date()), 60000)
     return () => clearInterval(timer)
   }, [])
-
-  const pollRef = { current: null as ReturnType<typeof setInterval> | null }
 
   const services = [
     { name: '前端界面', status: 'running', port: 'Vite/Electron' },
@@ -372,6 +398,52 @@ const Dashboard: React.FC = () => {
       <Text type="secondary" style={{ display: 'block', marginTop: -16, marginBottom: 24 }}>
         合并 Dashboard 与系统状态：统一查看 Agent、会话、Skills、资源、服务状态和最近日志。当前时间：{currentTime.toLocaleString('zh-CN')}
       </Text>
+
+      <Card
+        title="发布与运行自检"
+        extra={<Button icon={<SyncOutlined />} onClick={loadDashboardData}>刷新自检</Button>}
+        style={{ marginBottom: 24 }}
+      >
+        {selfCheck ? (
+          <>
+            <Space size="small" wrap style={{ marginBottom: 16 }}>
+              <Tag color={selfCheck.ok ? 'success' : 'warning'} icon={selfCheck.ok ? <CheckCircleOutlined /> : <ExclamationCircleOutlined />}>
+                {selfCheck.ok ? '自检通过' : '有项目需要确认'}
+              </Tag>
+              <Tag color="blue">{selfCheck.productName} v{selfCheck.version}</Tag>
+              {selfCheck.commit && <Tag>commit {selfCheck.commit}</Tag>}
+              <Tag>API :{selfCheck.port}</Tag>
+              <Text type="secondary">数据目录：{selfCheck.dataDir}</Text>
+            </Space>
+            <List
+              grid={{ gutter: 12, xs: 1, sm: 2, md: 2, lg: 4, xl: 4, xxl: 4 }}
+              dataSource={selfCheck.checks}
+              renderItem={item => (
+                <List.Item>
+                  <Card size="small">
+                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                      <Space>
+                        <Badge status={item.ok ? 'success' : 'warning'} />
+                        <Text strong>{item.label}</Text>
+                      </Space>
+                      <Text type="secondary" ellipsis={{ tooltip: item.value || item.path || '-' }}>
+                        {item.value || item.path || '-'}
+                      </Text>
+                    </Space>
+                  </Card>
+                </List.Item>
+              )}
+            />
+          </>
+        ) : (
+          <Alert
+            type="warning"
+            showIcon
+            message="暂未读取到自检结果"
+            description="请确认灵枢后端服务已启动，并稍后刷新。"
+          />
+        )}
+      </Card>
 
       {/* 统计卡片 */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>

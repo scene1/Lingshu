@@ -9,6 +9,9 @@ import { fileURLToPath } from 'url'
 import crypto from 'crypto'
 import MarkdownIt from 'markdown-it'
 
+const SERVER_FILE = fileURLToPath(import.meta.url)
+const SERVER_DIR = path.dirname(SERVER_FILE)
+
 // 放宽 SSL 证书校验（自签证书 / 内部 API 网关需要）
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 
@@ -35,6 +38,7 @@ const AGENT_DESKTOP_INVOCATIONS_FILE = path.join(DATA_DIR, 'agent-desktop-invoca
 const GROUP_CHAT_DIR = path.join(CHAT_DIR, 'group-chat')
 const upload = multer({ dest: UPLOAD_DIR })
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: true })
+const PACKAGE_INFO = readPackageInfo()
 const documentWatchState = {
   key: '',
   watcher: null,
@@ -91,10 +95,136 @@ app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
     name: 'lingshu-app',
+    version: PACKAGE_INFO.version,
     port: PORT,
     time: new Date().toISOString()
   })
 })
+
+app.get('/api/system/self-check', (req, res) => {
+  try {
+    res.json(getSystemSelfCheck())
+  } catch (error) {
+    res.status(500).json({ error: '系统自检失败', message: error.message })
+  }
+})
+
+function readPackageInfo() {
+  const fallback = { name: 'lingshu-app', version: '1.1.0', productName: '灵枢' }
+  try {
+    const packagePath = path.join(SERVER_DIR, 'package.json')
+    if (!fs.existsSync(packagePath)) return fallback
+    const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
+    return {
+      name: pkg.name || fallback.name,
+      version: pkg.version || fallback.version,
+      productName: pkg.build?.productName || fallback.productName
+    }
+  } catch (_) {
+    return fallback
+  }
+}
+
+function getGitCommit() {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: SERVER_DIR,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim()
+  } catch (_) {
+    return ''
+  }
+}
+
+function getDistPath() {
+  return [
+    path.join(SERVER_DIR, 'dist'),
+    path.join(SERVER_DIR, '..', 'dist'),
+    path.join(process.cwd(), 'dist')
+  ].find(candidate => fs.existsSync(path.join(candidate, 'index.html'))) || ''
+}
+
+function directoryContainsText(root, needle, limit = 80) {
+  if (!root || !fs.existsSync(root)) return false
+  let checked = 0
+  const stack = [root]
+  while (stack.length > 0 && checked < limit) {
+    const current = stack.pop()
+    let entries = []
+    try { entries = fs.readdirSync(current, { withFileTypes: true }) } catch (_) { continue }
+    for (const entry of entries) {
+      const filePath = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        stack.push(filePath)
+        continue
+      }
+      if (!/\.(html|js|css)$/i.test(entry.name)) continue
+      checked += 1
+      try {
+        const stat = fs.statSync(filePath)
+        if (stat.size > 3 * 1024 * 1024) continue
+        if (fs.readFileSync(filePath, 'utf8').includes(needle)) return true
+      } catch (_) {}
+      if (checked >= limit) break
+    }
+  }
+  return false
+}
+
+function checkPath(label, targetPath, type = 'exists') {
+  let ok = false
+  try {
+    if (type === 'file') ok = fs.existsSync(targetPath) && fs.statSync(targetPath).isFile()
+    else if (type === 'dir') ok = fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory()
+    else ok = fs.existsSync(targetPath)
+  } catch (_) {
+    ok = false
+  }
+  return { key: label, ok, path: targetPath }
+}
+
+function getSystemSelfCheck() {
+  const dist = getDistPath()
+  const configPath = path.join(os.homedir(), 'Lingshu', 'openclaw.json')
+  const lingshuRoot = path.join(os.homedir(), 'Lingshu')
+  const claude = getClaudeCliStatus()
+  const transcription = getTranscriptionConfig()
+  const documentsRouteBuilt = directoryContainsText(dist, 'DocumentWorkbench') || directoryContainsText(dist, '/api/documents')
+  const checks = [
+    { key: 'app-version', label: '应用版本', ok: PACKAGE_INFO.version === '1.1.0', value: `v${PACKAGE_INFO.version}` },
+    { key: 'data-root', label: '数据目录', ...checkPath('data-root', lingshuRoot, 'dir') },
+    { key: 'runtime-data', label: '运行数据', ...checkPath('runtime-data', DATA_DIR, 'dir') },
+    { key: 'config', label: '运行时配置', ...checkPath('config', configPath, 'file') },
+    { key: 'dist', label: '前端构建', ok: !!dist, path: dist || '未找到 dist/index.html' },
+    { key: 'documents', label: '文档工作台', ok: !!documentsRouteBuilt, value: documentsRouteBuilt ? '已包含在前端构建中' : '未在当前构建中检测到' },
+    { key: 'claude-cli', label: 'Claude CLI', ok: claude.available, path: claude.path || '未检测到 claude CLI' },
+    {
+      key: 'transcription',
+      label: '会议转写',
+      ok: transcription.provider === 'browser' || (!!transcription.enabled && !!transcription.baseUrl && !!transcription.apiKey),
+      value: transcription.provider === 'browser'
+        ? '浏览器实时识别'
+        : transcription.enabled
+          ? `${transcription.provider} / ${transcription.model || '未设置模型'}`
+          : '未启用服务端转写 Provider'
+    }
+  ]
+  return {
+    ok: checks.every(item => item.ok),
+    name: PACKAGE_INFO.name,
+    productName: PACKAGE_INFO.productName,
+    version: PACKAGE_INFO.version,
+    commit: getGitCommit(),
+    port: PORT,
+    time: new Date().toISOString(),
+    dataDir: DATA_DIR,
+    lingshuRoot,
+    distPath: dist,
+    checks
+  }
+}
 
 // 默认实例配置
 const DEFAULT_INSTANCES = [
@@ -662,7 +792,7 @@ const DEFAULT_SETTINGS = {
   data: { cacheSize: 0 },
   obsidian: DEFAULT_OBSIDIAN_SETTINGS,
   transcription: DEFAULT_TRANSCRIPTION_SETTINGS,
-  version: '1.0.0'
+  version: PACKAGE_INFO.version
 }
 
 if (!fs.existsSync(MEMORY_DIR)) fs.mkdirSync(MEMORY_DIR, { recursive: true })
@@ -2618,7 +2748,7 @@ function applyCcSwitchOpenClawProvider(provider) {
   const models = Array.isArray(provider.settings.models) ? provider.settings.models : []
   const firstModel = models[0]
   if (!provider.settings.baseUrl || !provider.settings.apiKey || !provider.settings.api || !firstModel?.id) {
-    throw new Error('CC Switch provider 缺少 baseUrl/apiKey/api/models，无法应用到 OpenClaw')
+    throw new Error('CC Switch provider 缺少 baseUrl/apiKey/api/models，无法应用到灵枢运行时')
   }
 
   const backupDir = path.join(DATA_DIR, 'cc-switch-backups')
@@ -2645,7 +2775,7 @@ function applyCcSwitchOpenClawProvider(provider) {
   config.meta = {
     ...(config.meta || {}),
     lastTouchedAt: new Date().toISOString(),
-    lastTouchedBy: 'openclaw-web-ui cc-switch'
+    lastTouchedBy: 'lingshu-app cc-switch'
   }
 
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
@@ -2692,7 +2822,7 @@ app.post('/api/cc-switch/switch', (req, res) => {
     const appType = String(req.body?.appType || 'openclaw')
     const providerId = String(req.body?.providerId || '')
     if (!providerId) return res.status(400).json({ error: 'providerId 为必填' })
-    if (appType !== 'openclaw') return res.status(400).json({ error: '当前仅支持切换 openclaw 路由' })
+    if (appType !== 'openclaw') return res.status(400).json({ error: '当前仅支持切换灵枢兼容路由' })
 
     const provider = getCcSwitchProviderRaw(appType, providerId)
     if (!provider) return res.status(404).json({ error: '未找到 CC Switch provider' })
@@ -2953,7 +3083,7 @@ app.post('/api/instances/:id/restart', (req, res) => {
       if (error) {
         res.status(500).json({ error: '重启失败', message: error.message })
       } else {
-        res.json({ success: true, message: 'OpenClaw 已重启' })
+        res.json({ success: true, message: '灵枢运行时已重启' })
       }
     })
   } else if (instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop') {
@@ -2991,7 +3121,7 @@ app.get('/api/instances/:id/logs', (req, res) => {
   
   // 模拟日志数据
   const logs = [
-    { id: '1', timestamp: '2024-05-22 10:30:15', level: 'info', source: 'system', message: 'OpenClaw 启动成功' },
+    { id: '1', timestamp: '2024-05-22 10:30:15', level: 'info', source: 'system', message: '灵枢运行时启动成功' },
     { id: '2', timestamp: '2024-05-22 10:30:16', level: 'info', source: 'gateway', message: 'Gateway 监听中' },
     { id: '3', timestamp: '2024-05-22 10:30:17', level: 'info', source: 'skill:weather', message: 'Skill 加载成功' },
   ]
@@ -3749,7 +3879,7 @@ app.post('/api/instances/:instanceId/sessions/:sessionId/chat', async (req, res)
       const routeModels = Array.isArray(route?.settings?.models) ? route.settings.models : []
       const fallbackModel = routeModels.find(m => m?.id)?.id
       if (!route || !route.settings?.baseUrl || !route.settings?.apiKey) {
-        reply = '[CC Switch] 未找到可用的 OpenClaw 路由，请先在 CC Switch 中配置 openclaw provider。'
+        reply = '[CC Switch] 未找到可用的灵枢兼容路由，请先在 CC Switch 中配置 openclaw provider。'
       } else {
         routedProvider = getCcSwitchApiProtocol(route.settings.api)
         routedModel = actualModel || fallbackModel
@@ -3818,7 +3948,7 @@ app.post('/api/instances/:instanceId/sessions/:sessionId/chat', async (req, res)
     console.error('调用 AI 失败:', error)
     let errorHint = ''
     if (error.cause?.code === 'ECONNREFUSED' || error.message?.includes('ECONNREFUSED') || error.message?.includes('connect ECONNREFUSED')) {
-      errorHint = '本地服务未运行，请确保 OpenClaw 已启动'
+      errorHint = '本地服务未运行，请确保灵枢运行时已启动'
     } else if (error.cause?.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || error.cause?.code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || error.message?.includes('SSL') || error.message?.includes('certificate')) {
       errorHint = 'SSL 证书验证失败，请检查网络代理或证书配置'
     } else if (error.cause?.code === 'ENOTFOUND' || error.message?.includes('ENOTFOUND')) {
@@ -5855,13 +5985,7 @@ app.post('/api/workflows/:id/run', (req, res) => {
 
 
 // ==================== 静态文件服务 ====================
-const serverFile = fileURLToPath(import.meta.url)
-const serverDir = path.dirname(serverFile)
-const distPath = [
-  path.join(serverDir, 'dist'),
-  path.join(serverDir, '..', 'dist'),
-  path.join(process.cwd(), 'dist')
-].find(candidate => fs.existsSync(path.join(candidate, 'index.html')))
+const distPath = getDistPath()
 
 if (distPath) {
   app.use(express.static(distPath))
@@ -5875,10 +5999,16 @@ if (distPath) {
 
 // ==================== 启动服务器 ====================
 
-app.listen(PORT, '127.0.0.1', () => {
+const httpServer = app.listen(PORT, '127.0.0.1', () => {
   console.log(`🚀 灵枢 App Server running on port ${PORT}`)
   console.log(`📱 API: http://127.0.0.1:${PORT}/api`)
   console.log(`💾 Data: ${DATA_DIR}`)
   console.log(`\n已加载 ${instances.length} 个实例：`)
   instances.forEach(i => console.log(`  • ${i.name} (${i.type}) - ${i.status}`))
+})
+
+httpServer.on('error', (error) => {
+  console.error(`灵枢后端监听失败：${error.message}`)
+  console.error(`请检查端口 ${PORT} 是否被占用，或尝试设置 LINGSHU_BACKEND_PORT 后重启。`)
+  process.exitCode = 1
 })

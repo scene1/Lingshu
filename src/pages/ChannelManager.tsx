@@ -376,7 +376,7 @@ const ChannelManager: React.FC = () => {
         <Space direction="vertical" style={{ width: '100%' }}>
           <div style={{ fontWeight: 500 }}>一键接入说明</div>
           <span style={{ color: '#666', fontSize: 13 }}>
-            OpenClaw 支持将 AI Agent 一键接入飞书、微信、QQ、钉钉、企业微信、Telegram 等多个即时通讯平台。
+            灵枢支持将 AI Agent 一键接入飞书、微信、QQ、钉钉、企业微信、Telegram 等多个即时通讯平台。
             配置正确的凭证后，用户即可在这些平台上与你的 Agent 对话。所有渠道共享同一套 Agent 和 Skills 配置。
           </span>
         </Space>

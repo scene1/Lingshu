@@ -5,6 +5,8 @@ const path = require('path')
 const { exec } = require('child_process')
 const os = require('os')
 
+// 兼容入口：当前 Electron 主进程默认 fork 根目录的 server-v2.js。
+// 保留此文件只是为了旧打包产物或旧脚本不直接崩溃；新增接口请优先维护 server-v2.js。
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 
 const app = express()
@@ -237,7 +239,7 @@ app.post('/api/instances/:id/restart', (req, res) => {
   if (instance.type === 'local' || instance.type === 'agent-desktop' || instance.type === 'stepfun-desktop') {
     exec('openclaw gateway restart', (error, stdout, stderr) => {
       if (error) res.status(500).json({ error: '重启失败', message: error.message })
-      else res.json({ success: true, message: 'OpenClaw 已重启' })
+      else res.json({ success: true, message: '灵枢运行时已重启' })
     })
   } else {
     res.json({ success: false, message: '远程实例重启暂未实现' })
@@ -451,7 +453,7 @@ function callProviderAI(params) {
     // OpenAI 兼容协议: /chat/completions + Bearer
     const bodyObj = { model, messages, max_tokens: maxTokens, temperature }
     const escapedBody = JSON.stringify(bodyObj).replace(/'/g, "'\\''")
-    curlCmd = `curl -s -w '\\n%{http_code}' -X POST '${cleanBaseUrl}/chat/completions' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${apiKey}' -H 'User-Agent: OpenClaw/1.0' -d '${escapedBody}' --max-time 60`
+    curlCmd = `curl -s -w '\\n%{http_code}' -X POST '${cleanBaseUrl}/chat/completions' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${apiKey}' -H 'User-Agent: Lingshu/1.1' -d '${escapedBody}' --max-time 60`
   }
 
   try {
@@ -878,7 +880,7 @@ else:
     console.error('调用 AI 失败:', error)
     let errorHint = ''
     if (error.cause?.code === 'ECONNREFUSED' || error.message?.includes('ECONNREFUSED') || error.message?.includes('connect ECONNREFUSED')) {
-      errorHint = '本地服务未运行，请确保 OpenClaw 已启动'
+      errorHint = '本地服务未运行，请确保灵枢运行时已启动'
     } else if (error.cause?.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || error.cause?.code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || error.message?.includes('SSL') || error.message?.includes('certificate')) {
       errorHint = 'SSL 证书验证失败，请检查网络代理或证书配置'
     } else if (error.cause?.code === 'ENOTFOUND' || error.message?.includes('ENOTFOUND')) {
@@ -1365,7 +1367,7 @@ app.get('/api/agents', (req, res) => {
   const agents = loadAgentsFromConfig()
   if (agents !== null) return res.json(agents)
   res.json([{
-    id: 'default-agent', name: 'OpenClaw Agent', status: 'running', model: 'step-alpha',
+    id: 'default-agent', name: '灵枢 Agent', status: 'running', model: 'step-alpha',
     lastActive: new Date().toISOString(),
     messageCount: instances.reduce((sum, i) => sum + (i.messageCount || 0), 0), uptime: '24h'
   }])
@@ -1758,7 +1760,7 @@ function writeObsidianMemoryNote({ title, content, tags = [] }) {
   if (!validation.ok) throw new Error(validation.reason)
   if (!config.writeMemoryEnabled) throw new Error('未启用写入 Obsidian 记忆')
 
-  const memoryDir = path.join(config.vaultPath, 'OpenClaw', 'Memory', 'Facts')
+  const memoryDir = path.join(config.vaultPath, '灵枢', 'Memory', 'Facts')
   fs.mkdirSync(memoryDir, { recursive: true })
   if (!isPathInside(config.vaultPath, memoryDir)) throw new Error('非法写入路径')
 
@@ -1775,12 +1777,12 @@ function writeObsidianMemoryNote({ title, content, tags = [] }) {
   const tagList = Array.isArray(tags) ? tags.map(tag => String(tag).replace(/^#/, '').trim()).filter(Boolean) : []
   const frontmatter = [
     '---',
-    `id: openclaw-${Date.now()}`,
+    `id: lingshu-${Date.now()}`,
     'type: memory',
-    'source: openclaw',
+    'source: lingshu',
     `created_at: ${now.toISOString()}`,
     `updated_at: ${now.toISOString()}`,
-    `tags: [${['openclaw-memory', ...tagList].map(tag => `"${tag}"`).join(', ')}]`,
+    `tags: [${['lingshu-memory', ...tagList].map(tag => `"${tag}"`).join(', ')}]`,
     '---'
   ].join('\n')
 
