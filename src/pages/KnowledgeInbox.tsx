@@ -107,6 +107,22 @@ const statusColor = (status: string) => {
 
 const sourceTypeLabel = (sourceType: string) => sourceTypeOptions.find(item => item.value === sourceType)?.label || sourceType
 
+const feedbackLabel = (value?: string) => {
+  if (value === 'useful') return '有用'
+  if (value === 'useless') return '无用'
+  if (value === 'accepted') return '采纳'
+  if (value === 'rejected') return '拒绝'
+  return value || ''
+}
+
+const feedbackColor = (value?: string) => {
+  if (value === 'useful') return 'green'
+  if (value === 'useless') return 'orange'
+  if (value === 'accepted') return 'blue'
+  if (value === 'rejected') return 'red'
+  return 'default'
+}
+
 const KnowledgeInbox: React.FC = () => {
   const [items, setItems] = useState<KnowledgeInboxItem[]>([])
   const [stats, setStats] = useState<InboxStats>({ total: 0, status: {}, sourceType: {} })
@@ -230,7 +246,8 @@ const KnowledgeInbox: React.FC = () => {
         body: JSON.stringify({ value })
       })
       setSelectedItem(data.item)
-      message.success('反馈已记录')
+      setItems(prev => prev.map(entry => entry.id === item.id ? data.item : entry))
+      message.success(`反馈已记录：${feedbackLabel(value)}`)
       await loadInbox()
     } catch (error: any) {
       message.error(error.message || '保存反馈失败')
@@ -274,6 +291,14 @@ const KnowledgeInbox: React.FC = () => {
       dataIndex: 'status',
       width: 100,
       render: (status: string) => <Tag color={statusColor(status)}>{statusLabel(status)}</Tag>
+    },
+    {
+      title: '反馈',
+      dataIndex: 'feedback',
+      width: 90,
+      render: (feedback: KnowledgeInboxItem['feedback']) => (
+        feedback?.value ? <Tag color={feedbackColor(feedback.value)}>{feedbackLabel(feedback.value)}</Tag> : <Text type="secondary">-</Text>
+      )
     },
     {
       title: '标签',
@@ -419,11 +444,21 @@ const KnowledgeInbox: React.FC = () => {
                 {selectedItem.vaultRelativePath && (
                   <Alert type="success" showIcon message="已写入知识库" description={selectedItem.vaultRelativePath} />
                 )}
+                {selectedItem.feedback?.value && (
+                  <Alert
+                    type={selectedItem.feedback.value === 'rejected' ? 'warning' : 'info'}
+                    showIcon
+                    message={`最近反馈：${feedbackLabel(selectedItem.feedback.value)}`}
+                    description={selectedItem.feedback.at ? new Date(selectedItem.feedback.at).toLocaleString('zh-CN') : undefined}
+                  />
+                )}
                 <Space wrap>
                   <Button icon={<ThunderboltOutlined />} disabled={selectedItem.status === 'written'} onClick={() => processItem(selectedItem)}>重新处理</Button>
                   <Button type="primary" icon={<FileTextOutlined />} disabled={selectedItem.status === 'written'} onClick={() => writeToVault(selectedItem)}>写入 Vault</Button>
                   <Button icon={<CheckCircleOutlined />} onClick={() => saveFeedback(selectedItem, 'useful')}>有用</Button>
-                  <Button onClick={() => saveFeedback(selectedItem, 'rejected')}>拒绝</Button>
+                  <Button onClick={() => saveFeedback(selectedItem, 'useless')}>无用</Button>
+                  <Button type="primary" ghost onClick={() => saveFeedback(selectedItem, 'accepted')}>采纳</Button>
+                  <Button danger onClick={() => saveFeedback(selectedItem, 'rejected')}>拒绝</Button>
                 </Space>
               </Space>
             ) : (

@@ -37,6 +37,7 @@ const DOCUMENT_WORKBENCH_FILE = path.join(DATA_DIR, 'document-workbench.json')
 const TOOL_RUNTIME_AUDIT_FILE = path.join(DATA_DIR, 'tool-runtime-audit.jsonl')
 const AGENT_DESKTOP_INVOCATIONS_FILE = path.join(DATA_DIR, 'agent-desktop-invocations.jsonl')
 const KNOWLEDGE_INBOX_FILE = path.join(DATA_DIR, 'knowledge-inbox.json')
+const FEEDBACK_LOG_FILE = path.join(DATA_DIR, 'feedback.jsonl')
 const LINGSHU_FRONTMATTER_SCHEMA_VERSION = 1
 const GROUP_CHAT_DIR = path.join(CHAT_DIR, 'group-chat')
 const upload = multer({ dest: UPLOAD_DIR })
@@ -1904,6 +1905,51 @@ function saveKnowledgeInbox(data) {
   }
   fs.writeFileSync(KNOWLEDGE_INBOX_FILE, JSON.stringify(next, null, 2))
   return next
+}
+
+const FEEDBACK_VALUES = new Set(['useful', 'useless', 'accepted', 'rejected'])
+
+function normalizeFeedbackValue(value) {
+  const clean = String(value || '').trim()
+  return FEEDBACK_VALUES.has(clean) ? clean : 'useful'
+}
+
+function feedbackLabel(value) {
+  if (value === 'useful') return '有用'
+  if (value === 'useless') return '无用'
+  if (value === 'accepted') return '采纳'
+  if (value === 'rejected') return '拒绝'
+  return String(value || '')
+}
+
+function appendFeedbackEvent(input = {}) {
+  const value = normalizeFeedbackValue(input.value)
+  const event = {
+    id: `fb_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+    value,
+    label: feedbackLabel(value),
+    targetType: String(input.targetType || 'unknown').slice(0, 80),
+    targetId: String(input.targetId || '').slice(0, 180),
+    source: String(input.source || 'lingshu').slice(0, 120),
+    note: String(input.note || '').slice(0, 1000),
+    context: input.context && typeof input.context === 'object' ? input.context : {},
+    createdAt: new Date().toISOString()
+  }
+  fs.mkdirSync(path.dirname(FEEDBACK_LOG_FILE), { recursive: true })
+  fs.appendFileSync(FEEDBACK_LOG_FILE, `${JSON.stringify(event)}\n`)
+  return event
+}
+
+function readFeedbackEvents(limit = 200) {
+  try {
+    if (!fs.existsSync(FEEDBACK_LOG_FILE)) return []
+    const lines = fs.readFileSync(FEEDBACK_LOG_FILE, 'utf8').split('\n').filter(Boolean)
+    return lines.slice(-Math.min(Math.max(Number(limit) || 200, 1), 1000)).reverse().map(line => {
+      try { return JSON.parse(line) } catch (_) { return null }
+    }).filter(Boolean)
+  } catch (_) {
+    return []
+  }
 }
 
 function normalizeKnowledgeTags(tags) {
@@ -5622,19 +5668,58 @@ app.post('/api/knowledge-inbox/:id/write-to-vault', (req, res) => {
   }
 })
 
+app.get('/api/feedback', (req, res) => {
+  try {
+    res.json({
+      ok: true,
+      events: readFeedbackEvents(Number(req.query.limit) || 200)
+    })
+  } catch (error) {
+    res.status(500).json({ error: '读取反馈失败', message: error.message })
+  }
+})
+
+app.post('/api/feedback', (req, res) => {
+  try {
+    const event = appendFeedbackEvent(req.body || {})
+    res.json({ success: true, event })
+  } catch (error) {
+    res.status(400).json({ error: '记录反馈失败', message: error.message })
+  }
+})
+
 app.post('/api/knowledge-inbox/:id/feedback', (req, res) => {
   try {
     const data = loadKnowledgeInbox()
     const index = data.items.findIndex(item => item.id === req.params.id)
     if (index < 0) return res.status(404).json({ error: '知识流条目不存在' })
+    const value = normalizeFeedbackValue(req.body?.value)
     const feedback = {
-      value: ['useful', 'useless', 'accepted', 'rejected'].includes(req.body?.value) ? req.body.value : 'useful',
+      value,
       note: String(req.body?.note || '').slice(0, 500),
       at: new Date().toISOString()
     }
-    data.items[index] = { ...data.items[index], feedback, updatedAt: new Date().toISOString() }
+    const statusPatch = value === 'accepted'
+      ? { status: data.items[index].status === 'written' ? 'written' : 'ready' }
+      : value === 'rejected'
+        ? { status: 'ignored' }
+        : {}
+    data.items[index] = { ...data.items[index], ...statusPatch, feedback, updatedAt: new Date().toISOString() }
     saveKnowledgeInbox(data)
-    res.json({ success: true, item: data.items[index] })
+    const event = appendFeedbackEvent({
+      value,
+      note: feedback.note,
+      targetType: 'knowledge-inbox',
+      targetId: data.items[index].id,
+      source: 'knowledge-inbox',
+      context: {
+        title: data.items[index].title,
+        sourceType: data.items[index].sourceType,
+        status: data.items[index].status,
+        tags: data.items[index].tags
+      }
+    })
+    res.json({ success: true, item: data.items[index], event })
   } catch (error) {
     res.status(400).json({ error: '保存反馈失败', message: error.message })
   }

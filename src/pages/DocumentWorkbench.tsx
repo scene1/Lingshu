@@ -194,6 +194,7 @@ interface AiDiffCard {
   baseContent: string
   createdAt: string
   status: 'pending' | 'accepted' | 'rejected'
+  feedback?: { value: 'useful' | 'useless' | 'accepted' | 'rejected'; at: string }
 }
 
 interface Meeting {
@@ -1247,6 +1248,32 @@ const DocumentWorkbench: React.FC = () => {
     }
   }
 
+  const recordAiCardFeedback = async (card: AiDiffCard, value: NonNullable<AiDiffCard['feedback']>['value']) => {
+    const feedback = { value, at: new Date().toISOString() }
+    setAiCards(prev => prev.map(item => item.id === card.id ? { ...item, feedback } : item))
+    try {
+      await apiJson('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          value,
+          targetType: 'document-agent-card',
+          targetId: card.id,
+          source: 'document-workbench',
+          context: {
+            documentPath: document?.path || '',
+            action: card.action,
+            instruction: card.instruction,
+            model: card.model,
+            contextPolicy: card.contextPolicy,
+            scope: card.scope,
+            status: card.status
+          }
+        })
+      })
+    } catch (_) {}
+  }
+
   const applyAiCard = (card: AiDiffCard) => {
     if (card.status !== 'pending') return
     if (content !== card.baseContent) {
@@ -1259,11 +1286,13 @@ const DocumentWorkbench: React.FC = () => {
       setContent(card.proposal)
     }
     setAiCards(prev => prev.map(item => item.id === card.id ? { ...item, status: 'accepted' } : item))
+    void recordAiCardFeedback({ ...card, status: 'accepted' }, 'accepted')
     message.success('已应用 AI 建议')
   }
 
-  const rejectAiCard = (cardId: string) => {
-    setAiCards(prev => prev.map(item => item.id === cardId ? { ...item, status: 'rejected' } : item))
+  const rejectAiCard = (card: AiDiffCard) => {
+    setAiCards(prev => prev.map(item => item.id === card.id ? { ...item, status: 'rejected' } : item))
+    void recordAiCardFeedback({ ...card, status: 'rejected' }, 'rejected')
   }
 
   const removeAiCard = (cardId: string) => {
@@ -2310,10 +2339,17 @@ const DocumentWorkbench: React.FC = () => {
                                       <Text type="secondary">{card.scope === 'selection' ? '选区' : '全文'}</Text>
                                       {card.contextPolicy && <Text type="secondary">{card.contextPolicy}</Text>}
                                       {card.model && <Text type="secondary">{card.model}</Text>}
+                                      {card.feedback && (
+                                        <Tag color={card.feedback.value === 'accepted' ? 'green' : card.feedback.value === 'rejected' ? 'red' : card.feedback.value === 'useful' ? 'blue' : 'orange'}>
+                                          {card.feedback.value === 'accepted' ? '已采纳反馈' : card.feedback.value === 'rejected' ? '已拒绝反馈' : card.feedback.value === 'useful' ? '有用' : '无用'}
+                                        </Tag>
+                                      )}
                                     </Space>
                                     <Space size={8}>
-                                      <Button size="small" disabled={card.status !== 'pending'} onClick={() => rejectAiCard(card.id)}>拒绝</Button>
-                                      <Button size="small" type="primary" icon={<CheckOutlined />} disabled={card.status !== 'pending' || stale} onClick={() => applyAiCard(card)}>接受</Button>
+                                      <Button size="small" disabled={card.status !== 'pending'} onClick={() => recordAiCardFeedback(card, 'useful')}>有用</Button>
+                                      <Button size="small" disabled={card.status !== 'pending'} onClick={() => recordAiCardFeedback(card, 'useless')}>无用</Button>
+                                      <Button size="small" danger disabled={card.status !== 'pending'} onClick={() => rejectAiCard(card)}>拒绝</Button>
+                                      <Button size="small" type="primary" icon={<CheckOutlined />} disabled={card.status !== 'pending' || stale} onClick={() => applyAiCard(card)}>采纳</Button>
                                       <Button size="small" onClick={() => removeAiCard(card.id)}>移除</Button>
                                     </Space>
                                   </div>
