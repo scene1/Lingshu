@@ -38,6 +38,7 @@ const TOOL_RUNTIME_AUDIT_FILE = path.join(DATA_DIR, 'tool-runtime-audit.jsonl')
 const AGENT_DESKTOP_INVOCATIONS_FILE = path.join(DATA_DIR, 'agent-desktop-invocations.jsonl')
 const KNOWLEDGE_INBOX_FILE = path.join(DATA_DIR, 'knowledge-inbox.json')
 const FEEDBACK_LOG_FILE = path.join(DATA_DIR, 'feedback.jsonl')
+const KNOWLEDGE_AUTOMATION_FILE = path.join(DATA_DIR, 'knowledge-automation.json')
 const LINGSHU_FRONTMATTER_SCHEMA_VERSION = 1
 const GROUP_CHAT_DIR = path.join(CHAT_DIR, 'group-chat')
 const upload = multer({ dest: UPLOAD_DIR })
@@ -2035,6 +2036,125 @@ function normalizeKnowledgeInboxItem(input, previous = {}) {
     processedAt: input.processedAt || previous.processedAt || '',
     writtenAt: input.writtenAt || previous.writtenAt || ''
   }
+}
+
+const KNOWLEDGE_AUTOMATION_TYPES = new Set(['rss', 'webhook', 'cron'])
+
+function loadKnowledgeAutomation() {
+  try {
+    const data = JSON.parse(fs.readFileSync(KNOWLEDGE_AUTOMATION_FILE, 'utf8'))
+    return {
+      sources: Array.isArray(data.sources) ? data.sources : [],
+      updatedAt: data.updatedAt || ''
+    }
+  } catch (_) {
+    return { sources: [], updatedAt: '' }
+  }
+}
+
+function saveKnowledgeAutomation(data) {
+  const next = {
+    sources: Array.isArray(data.sources) ? data.sources.slice(0, 500) : [],
+    updatedAt: new Date().toISOString()
+  }
+  fs.writeFileSync(KNOWLEDGE_AUTOMATION_FILE, JSON.stringify(next, null, 2))
+  return next
+}
+
+function normalizeKnowledgeAutomationSource(input = {}, previous = {}) {
+  const now = new Date().toISOString()
+  const type = KNOWLEDGE_AUTOMATION_TYPES.has(String(input.type || previous.type || 'rss'))
+    ? String(input.type || previous.type || 'rss')
+    : 'rss'
+  const id = previous.id || input.id || `kas_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`
+  return {
+    id,
+    type,
+    name: safeDocumentTitle(input.name || previous.name || (type === 'rss' ? 'RSS 来源' : type === 'webhook' ? 'Webhook 入口' : 'Cron 任务')),
+    url: String(input.url ?? previous.url ?? '').trim(),
+    cron: String(input.cron ?? previous.cron ?? '').trim(),
+    instruction: String(input.instruction ?? previous.instruction ?? '').trim(),
+    enabled: input.enabled === undefined ? (previous.enabled !== false) : !!input.enabled,
+    tags: normalizeKnowledgeTags(input.tags !== undefined ? input.tags : previous.tags || [type, 'automation']),
+    createdAt: previous.createdAt || input.createdAt || now,
+    updatedAt: now,
+    lastRunAt: previous.lastRunAt || '',
+    lastRunStatus: previous.lastRunStatus || '',
+    lastRunMessage: previous.lastRunMessage || '',
+    capturedCount: Number(previous.capturedCount || 0)
+  }
+}
+
+function decodeXmlEntity(value) {
+  return String(value || '')
+    .replace(/<!\[CDATA\[([\s\S]*?)]]>/g, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim()
+}
+
+function extractXmlTag(block, tag) {
+  const match = String(block || '').match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'))
+  return decodeXmlEntity(match?.[1] || '')
+}
+
+function parseRssItems(xml, maxItems = 12) {
+  const blocks = [...String(xml || '').matchAll(/<item\b[\s\S]*?<\/item>/gi)].map(match => match[0])
+  const atomBlocks = blocks.length > 0 ? blocks : [...String(xml || '').matchAll(/<entry\b[\s\S]*?<\/entry>/gi)].map(match => match[0])
+  return atomBlocks.slice(0, Math.min(Math.max(Number(maxItems) || 12, 1), 30)).map(block => {
+    const linkTag = extractXmlTag(block, 'link')
+    const atomLink = block.match(/<link[^>]+href=["']([^"']+)["'][^>]*>/i)?.[1] || ''
+    return {
+      title: extractXmlTag(block, 'title') || '未命名 RSS 条目',
+      url: linkTag || atomLink,
+      content: [
+        extractXmlTag(block, 'description') || extractXmlTag(block, 'summary') || extractXmlTag(block, 'content'),
+        extractXmlTag(block, 'pubDate') || extractXmlTag(block, 'updated')
+      ].filter(Boolean).join('\n\n')
+    }
+  }).filter(item => item.title || item.content || item.url)
+}
+
+function addKnowledgeInboxItems(items) {
+  const data = loadKnowledgeInbox()
+  const nextItems = items.map(item => normalizeKnowledgeInboxItem(item))
+  data.items = [...nextItems, ...data.items]
+  saveKnowledgeInbox(data)
+  return nextItems
+}
+
+async function runKnowledgeAutomationSource(source) {
+  if (!source.enabled) return { ok: false, captured: 0, message: '入口未启用' }
+  if (source.type === 'rss') {
+    if (!source.url) return { ok: false, captured: 0, message: 'RSS URL 为空' }
+    const response = await fetch(source.url, {
+      headers: { 'User-Agent': 'Lingshu/1.1 Knowledge Automation' }
+    })
+    if (!response.ok) throw new Error(`RSS 请求失败：HTTP ${response.status}`)
+    const xml = await response.text()
+    const items = parseRssItems(xml, 12).map(item => ({
+      title: item.title,
+      content: [item.content, item.url ? `来源：${item.url}` : ''].filter(Boolean).join('\n\n'),
+      sourceType: 'rss',
+      sourceUrl: item.url || source.url,
+      tags: normalizeKnowledgeTags([...(source.tags || []), 'rss'])
+    }))
+    const captured = addKnowledgeInboxItems(items)
+    return { ok: true, captured: captured.length, message: `已捕获 ${captured.length} 条 RSS 内容` }
+  }
+  if (source.type === 'cron') {
+    const captured = addKnowledgeInboxItems([{
+      title: source.name,
+      content: source.instruction || `Cron 任务触发：${source.cron || 'manual'}`,
+      sourceType: 'api',
+      tags: normalizeKnowledgeTags([...(source.tags || []), 'cron'])
+    }])
+    return { ok: true, captured: captured.length, message: '已创建 Cron 手动运行条目' }
+  }
+  return { ok: true, captured: 0, message: 'Webhook 入口等待外部 POST 捕获' }
 }
 
 function processKnowledgeInboxItem(item) {
@@ -5685,6 +5805,94 @@ app.post('/api/feedback', (req, res) => {
     res.json({ success: true, event })
   } catch (error) {
     res.status(400).json({ error: '记录反馈失败', message: error.message })
+  }
+})
+
+app.get('/api/knowledge-automation', (req, res) => {
+  try {
+    res.json({ ok: true, ...loadKnowledgeAutomation() })
+  } catch (error) {
+    res.status(500).json({ error: '读取知识自动入口失败', message: error.message })
+  }
+})
+
+app.post('/api/knowledge-automation', (req, res) => {
+  try {
+    const data = loadKnowledgeAutomation()
+    const source = normalizeKnowledgeAutomationSource(req.body || {})
+    data.sources = [source, ...data.sources]
+    saveKnowledgeAutomation(data)
+    res.json({ success: true, source })
+  } catch (error) {
+    res.status(400).json({ error: '创建知识自动入口失败', message: error.message })
+  }
+})
+
+app.patch('/api/knowledge-automation/:id', (req, res) => {
+  try {
+    const data = loadKnowledgeAutomation()
+    const index = data.sources.findIndex(item => item.id === req.params.id)
+    if (index < 0) return res.status(404).json({ error: '知识自动入口不存在' })
+    const source = normalizeKnowledgeAutomationSource(req.body || {}, data.sources[index])
+    data.sources[index] = source
+    saveKnowledgeAutomation(data)
+    res.json({ success: true, source })
+  } catch (error) {
+    res.status(400).json({ error: '更新知识自动入口失败', message: error.message })
+  }
+})
+
+app.delete('/api/knowledge-automation/:id', (req, res) => {
+  try {
+    const data = loadKnowledgeAutomation()
+    const before = data.sources.length
+    data.sources = data.sources.filter(item => item.id !== req.params.id)
+    saveKnowledgeAutomation(data)
+    res.json({ success: true, deleted: before - data.sources.length })
+  } catch (error) {
+    res.status(500).json({ error: '删除知识自动入口失败', message: error.message })
+  }
+})
+
+app.post('/api/knowledge-automation/:id/run', async (req, res) => {
+  try {
+    const data = loadKnowledgeAutomation()
+    const index = data.sources.findIndex(item => item.id === req.params.id)
+    if (index < 0) return res.status(404).json({ error: '知识自动入口不存在' })
+    const result = await runKnowledgeAutomationSource(data.sources[index])
+    data.sources[index] = {
+      ...data.sources[index],
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: result.ok ? 'success' : 'skipped',
+      lastRunMessage: result.message,
+      capturedCount: Number(data.sources[index].capturedCount || 0) + Number(result.captured || 0),
+      updatedAt: new Date().toISOString()
+    }
+    saveKnowledgeAutomation(data)
+    res.json({ success: result.ok, result, source: data.sources[index] })
+  } catch (error) {
+    res.status(400).json({ error: '运行知识自动入口失败', message: error.message })
+  }
+})
+
+app.post('/api/webhooks/knowledge/:id', (req, res) => {
+  try {
+    const data = loadKnowledgeAutomation()
+    const source = data.sources.find(item => item.id === req.params.id && item.type === 'webhook')
+    if (!source) return res.status(404).json({ error: 'Webhook 入口不存在' })
+    if (!source.enabled) return res.status(403).json({ error: 'Webhook 入口未启用' })
+    const body = req.body || {}
+    const payloadText = typeof body === 'string' ? body : JSON.stringify(body, null, 2)
+    const items = addKnowledgeInboxItems([{
+      title: body.title || source.name || 'Webhook 捕获',
+      content: body.content || body.text || payloadText,
+      sourceType: 'api',
+      sourceUrl: body.url || body.sourceUrl || '',
+      tags: normalizeKnowledgeTags([...(source.tags || []), 'webhook'])
+    }])
+    res.json({ success: true, captured: items.length, items })
+  } catch (error) {
+    res.status(400).json({ error: 'Webhook 捕获失败', message: error.message })
   }
 })
 

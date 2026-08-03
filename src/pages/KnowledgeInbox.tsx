@@ -60,6 +60,21 @@ interface InboxStats {
   sourceType: Record<string, number>
 }
 
+interface KnowledgeAutomationSource {
+  id: string
+  type: 'rss' | 'webhook' | 'cron'
+  name: string
+  url?: string
+  cron?: string
+  instruction?: string
+  enabled: boolean
+  tags: string[]
+  lastRunAt?: string
+  lastRunStatus?: string
+  lastRunMessage?: string
+  capturedCount?: number
+}
+
 const sourceTypeOptions = [
   { value: 'text', label: '文本 / 灵感' },
   { value: 'url', label: '网页 URL' },
@@ -81,6 +96,12 @@ const statusOptions = [
 ]
 
 const sourceFilterOptions = [{ value: '', label: '全部来源' }, ...sourceTypeOptions]
+
+const automationTypeOptions = [
+  { value: 'rss', label: 'RSS' },
+  { value: 'webhook', label: 'Webhook' },
+  { value: 'cron', label: 'Cron' }
+]
 
 const apiJson = async (url: string, options?: RequestInit) => {
   const response = await fetch(url, options)
@@ -134,7 +155,11 @@ const KnowledgeInbox: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('')
   const [sourceFilter, setSourceFilter] = useState('')
   const [vaultFolder, setVaultFolder] = useState('00_Inbox/灵枢知识流')
+  const [automationSources, setAutomationSources] = useState<KnowledgeAutomationSource[]>([])
+  const [automationLoading, setAutomationLoading] = useState(false)
+  const [runningAutomationId, setRunningAutomationId] = useState('')
   const [form] = Form.useForm()
+  const [automationForm] = Form.useForm()
 
   const loadInbox = async () => {
     setLoading(true)
@@ -153,8 +178,21 @@ const KnowledgeInbox: React.FC = () => {
     }
   }
 
+  const loadAutomationSources = async () => {
+    setAutomationLoading(true)
+    try {
+      const data = await apiJson('/api/knowledge-automation')
+      setAutomationSources(Array.isArray(data.sources) ? data.sources : [])
+    } catch (error: any) {
+      message.warning(error.message || '读取自动入口失败')
+    } finally {
+      setAutomationLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadInbox()
+    loadAutomationSources()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, sourceFilter])
 
@@ -197,6 +235,50 @@ const KnowledgeInbox: React.FC = () => {
       setSubmitting(false)
     }
   }
+
+  const createAutomationSource = async (values: any) => {
+    try {
+      const data = await apiJson('/api/knowledge-automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...values,
+          tags: values.tags || ['automation', values.type]
+        })
+      })
+      setAutomationSources(prev => [data.source, ...prev])
+      automationForm.resetFields()
+      message.success('自动入口已创建')
+    } catch (error: any) {
+      message.error(error.message || '创建自动入口失败')
+    }
+  }
+
+  const runAutomationSource = async (source: KnowledgeAutomationSource) => {
+    setRunningAutomationId(source.id)
+    try {
+      const data = await apiJson(`/api/knowledge-automation/${source.id}/run`, { method: 'POST' })
+      setAutomationSources(prev => prev.map(item => item.id === source.id ? data.source : item))
+      message.success(data.result?.message || '自动入口已运行')
+      await loadInbox()
+    } catch (error: any) {
+      message.error(error.message || '运行自动入口失败')
+    } finally {
+      setRunningAutomationId('')
+    }
+  }
+
+  const deleteAutomationSource = async (source: KnowledgeAutomationSource) => {
+    try {
+      await apiJson(`/api/knowledge-automation/${source.id}`, { method: 'DELETE' })
+      setAutomationSources(prev => prev.filter(item => item.id !== source.id))
+      message.success('自动入口已删除')
+    } catch (error: any) {
+      message.error(error.message || '删除自动入口失败')
+    }
+  }
+
+  const webhookUrl = (source: KnowledgeAutomationSource) => `${window.location.origin}/api/webhooks/knowledge/${source.id}`
 
   const processItem = async (item: KnowledgeInboxItem) => {
     try {
@@ -374,6 +456,104 @@ const KnowledgeInbox: React.FC = () => {
           <Card><Statistic title="入库率" value={completionRate} suffix="%" valueStyle={{ color: '#52c41a' }} /></Card>
         </Col>
       </Row>
+
+      <Card
+        title="自动入口：RSS / Webhook / Cron"
+        extra={<Button size="small" icon={<ReloadOutlined />} loading={automationLoading} onClick={loadAutomationSources}>刷新入口</Button>}
+        style={{ marginBottom: 16 }}
+      >
+        <Form
+          form={automationForm}
+          layout="vertical"
+          onFinish={createAutomationSource}
+          initialValues={{ type: 'rss', tags: ['automation'] }}
+        >
+          <Row gutter={[12, 0]}>
+            <Col xs={24} md={4}>
+              <Form.Item name="type" label="类型" rules={[{ required: true }]}>
+                <Select options={automationTypeOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={5}>
+              <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入入口名称' }]}>
+                <Input placeholder="例如：AI 新闻 RSS" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={7}>
+              <Form.Item name="url" label="RSS URL / 外部地址">
+                <Input placeholder="RSS 填订阅地址；Webhook 可留空" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="cron" label="Cron">
+                <Input placeholder="0 8 * * *" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="tags" label="标签">
+                <Select mode="tags" placeholder="automation" />
+              </Form.Item>
+            </Col>
+            <Col xs={24}>
+              <Form.Item name="instruction" label="处理说明">
+                <Input.TextArea rows={2} placeholder="可写过滤条件、摘要偏好，Cron 手动运行时会作为 Inbox 内容。" />
+              </Form.Item>
+            </Col>
+            <Col xs={24}>
+              <Button type="primary" htmlType="submit" icon={<PlusOutlined />}>新增自动入口</Button>
+            </Col>
+          </Row>
+        </Form>
+
+        {automationSources.length > 0 ? (
+          <List
+            loading={automationLoading}
+            size="small"
+            dataSource={automationSources}
+            renderItem={source => (
+              <List.Item
+                actions={[
+                  <Button key="run" size="small" loading={runningAutomationId === source.id} onClick={() => runAutomationSource(source)}>
+                    手动运行
+                  </Button>,
+                  <Popconfirm key="delete" title="删除这个自动入口？" onConfirm={() => deleteAutomationSource(source)}>
+                    <Button size="small" danger>删除</Button>
+                  </Popconfirm>
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <Space wrap>
+                      <Tag color={source.type === 'rss' ? 'green' : source.type === 'webhook' ? 'blue' : 'purple'}>{source.type.toUpperCase()}</Tag>
+                      <Text strong>{source.name}</Text>
+                      <Tag color={source.enabled ? 'success' : 'default'}>{source.enabled ? '启用' : '停用'}</Tag>
+                    </Space>
+                  }
+                  description={
+                    <Space direction="vertical" size={2}>
+                      {source.type === 'webhook' ? (
+                        <Text copyable={{ text: webhookUrl(source) }} type="secondary">{webhookUrl(source)}</Text>
+                      ) : (
+                        <Text type="secondary" ellipsis={{ tooltip: source.url || source.cron || source.instruction || '-' }}>
+                          {source.url || source.cron || source.instruction || '-'}
+                        </Text>
+                      )}
+                      <Space wrap size={4}>
+                        {(source.tags || []).map(tag => <Tag key={`${source.id}-${tag}`}>#{tag}</Tag>)}
+                        {source.lastRunAt && <Text type="secondary">上次：{new Date(source.lastRunAt).toLocaleString('zh-CN')}</Text>}
+                        {source.lastRunMessage && <Text type="secondary">{source.lastRunMessage}</Text>}
+                        <Text type="secondary">累计捕获 {source.capturedCount || 0}</Text>
+                      </Space>
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无自动入口，可先添加 RSS 或 Webhook。" />
+        )}
+      </Card>
 
       <Card style={{ marginBottom: 16 }}>
         <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
