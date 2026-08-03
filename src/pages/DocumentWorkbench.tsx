@@ -550,6 +550,25 @@ const DocumentWorkbench: React.FC = () => {
   const recognitionRef = useRef<any>(null)
   const audioImportInputRef = useRef<HTMLInputElement | null>(null)
 
+  const getServerTranscriptionIssue = useCallback((settings: TranscriptionSettings = transcriptionSettings) => {
+    if (settings.provider === 'browser') {
+      return '浏览器实时识别只在“开始录音”期间产生逐字稿；导入录音或历史录音请配置 OpenAI-compatible 服务端转写，或手动粘贴逐字稿后再生成纪要。'
+    }
+    if (!settings.enabled) return '未启用服务端转写 Provider'
+    if (!settings.baseUrl.trim() || !settings.apiKey.trim() || !settings.model.trim()) {
+      return '服务端转写 Provider 缺少 Base URL、API Key 或模型名'
+    }
+    return ''
+  }, [transcriptionSettings])
+
+  const updateTranscriptionProvider = (provider: TranscriptionSettings['provider']) => {
+    setTranscriptionSettings(prev => ({
+      ...prev,
+      provider,
+      enabled: provider === 'openai-compatible'
+    }))
+  }
+
   const dirty = !!document && content !== savedContent
   const propertyFiltersActive = selectedPropertyTags.length > 0 || !!selectedPropertyStatus || !!propertyFilterText.trim()
   const parsedFrontMatter = useMemo(() => parseDocumentFrontMatter(content), [content])
@@ -563,6 +582,7 @@ const DocumentWorkbench: React.FC = () => {
   const versionDiffRows = useMemo(() => buildLineDiff(selectedVersion?.content || '', content), [selectedVersion, content])
   const externalDiffRows = useMemo(() => buildLineDiff(externalChange?.content || '', content), [externalChange, content])
   const isCurrentFavorite = !!document && favoriteDocs.some(item => item.path === document.path)
+  const transcriptionIssue = getServerTranscriptionIssue()
 
   const loadStatus = useCallback(async () => {
     const data = await apiJson('/api/documents/status')
@@ -1291,12 +1311,26 @@ const DocumentWorkbench: React.FC = () => {
 
   const finalizeMeeting = async (targetMeeting: Meeting | null = meeting, sourceTranscript = transcript) => {
     if (!targetMeeting) return
+    const transcriptText = sourceTranscript.trim()
+    const hasAudio = !!(targetMeeting.audioPath || targetMeeting.hasAudio)
+    if (!transcriptText) {
+      if (hasAudio) {
+        const issue = getServerTranscriptionIssue()
+        if (issue) {
+          message.warning(issue)
+          return
+        }
+      } else {
+        message.warning('请先录音、导入录音，或手动粘贴逐字稿后再生成纪要')
+        return
+      }
+    }
     setFinalizing(true)
     try {
       const data = await apiJson(`/api/meetings/${targetMeeting.id}/finalize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: sourceTranscript, model: selectedModel })
+        body: JSON.stringify({ transcript: transcriptText, transcription: transcriptionSettings, model: selectedModel })
       })
       setMeeting(data)
       if (data.transcript) setTranscript(data.transcript)
@@ -1327,6 +1361,15 @@ const DocumentWorkbench: React.FC = () => {
   }
 
   const retranscribeMeeting = async (item: Meeting) => {
+    if (!item.hasAudio) {
+      message.warning('该会议没有可转写的录音文件')
+      return
+    }
+    const issue = getServerTranscriptionIssue()
+    if (issue) {
+      message.warning(issue)
+      return
+    }
     setRetranscribingMeetingId(item.id)
     try {
       const data = await apiJson(`/api/meetings/${item.id}/retranscribe`, {
@@ -1352,6 +1395,13 @@ const DocumentWorkbench: React.FC = () => {
   }
 
   const regenerateMeetingMinutes = async (item: Meeting) => {
+    if (!item.hasTranscript && item.hasAudio) {
+      const issue = getServerTranscriptionIssue()
+      if (issue) {
+        message.warning(issue)
+        return
+      }
+    }
     setRegeneratingMeetingId(item.id)
     try {
       const detail = await apiJson(`/api/meetings/${item.id}`)
@@ -2192,14 +2242,19 @@ const DocumentWorkbench: React.FC = () => {
               <div className="meeting-workspace">
                 <div className="meeting-transcription-config">
                   <Space wrap align="center">
-                    <Switch checked={transcriptionSettings.enabled} onChange={checked => updateTranscriptionSetting('enabled', checked)} />
+                    <Switch
+                      checked={transcriptionSettings.enabled}
+                      disabled={transcriptionSettings.provider === 'browser'}
+                      onChange={checked => updateTranscriptionSetting('enabled', checked)}
+                    />
+                    <Text type="secondary">服务端转写</Text>
                     <Select
                       value={transcriptionSettings.provider}
                       style={{ width: 190 }}
-                      onChange={value => updateTranscriptionSetting('provider', value)}
+                      onChange={updateTranscriptionProvider}
                       options={[
-                        { value: 'browser', label: '浏览器实时识别' },
-                        { value: 'openai-compatible', label: 'OpenAI-compatible' }
+                        { value: 'browser', label: '浏览器实时识别（录音时）' },
+                        { value: 'openai-compatible', label: 'OpenAI-compatible（录音文件）' }
                       ]}
                     />
                     {transcriptionSettings.provider === 'openai-compatible' && (
@@ -2232,6 +2287,28 @@ const DocumentWorkbench: React.FC = () => {
                     )}
                     <Button loading={savingTranscription} onClick={saveTranscriptionSettings}>保存转写设置</Button>
                   </Space>
+                  {transcriptionSettings.provider === 'browser' ? (
+                    <Alert
+                      style={{ marginTop: 10 }}
+                      type="info"
+                      showIcon
+                      message="浏览器实时识别只在点击“开始录音”期间产生逐字稿；导入录音、历史录音重新转写需要配置 OpenAI-compatible 服务端转写，或手动粘贴逐字稿后生成纪要。"
+                    />
+                  ) : transcriptionIssue ? (
+                    <Alert
+                      style={{ marginTop: 10 }}
+                      type="warning"
+                      showIcon
+                      message={transcriptionIssue}
+                    />
+                  ) : (
+                    <Alert
+                      style={{ marginTop: 10 }}
+                      type="success"
+                      showIcon
+                      message="服务端转写已配置：导入录音、历史会议重新转写和无逐字稿生成纪要时会自动使用该 Provider。"
+                    />
+                  )}
                 </div>
                 <div className="meeting-control">
                   <Space wrap>

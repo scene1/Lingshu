@@ -1960,7 +1960,15 @@ async function transcribeAudioFile(audioPath, overrides = {}) {
   }
 
   const config = getTranscriptionConfig(overrides)
-  if (!config.enabled || config.provider === 'browser') {
+  if (config.provider === 'browser') {
+    return {
+      text: '',
+      provider: config.provider,
+      error: '浏览器实时识别只能在录音时使用；导入录音或历史录音请配置 OpenAI-compatible 服务端转写，或手动粘贴逐字稿后生成纪要'
+    }
+  }
+
+  if (!config.enabled) {
     return { text: '', provider: config.provider, error: '未启用服务端转写 Provider' }
   }
 
