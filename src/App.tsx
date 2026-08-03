@@ -12,7 +12,8 @@ import {
   TeamOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  FileTextOutlined
+  FileTextOutlined,
+  InboxOutlined
 } from '@ant-design/icons'
 import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom'
 import packageJson from '../package.json'
@@ -29,6 +30,7 @@ const MCPConfig = React.lazy(() => import('./pages/MCPConfig'))
 const Settings = React.lazy(() => import('./pages/Settings'))
 const GroupChat = React.lazy(() => import('./pages/GroupChat'))
 const DocumentWorkbench = React.lazy(() => import('./pages/DocumentWorkbench'))
+const KnowledgeInbox = React.lazy(() => import('./pages/KnowledgeInbox'))
 import { SettingsProvider, useSettings } from './contexts/SettingsContext'
 
 const { Header, Sider, Content } = Layout
@@ -92,6 +94,11 @@ const AppInner: React.FC = () => {
       key: '/group-chat',
       icon: <TeamOutlined />,
       label: <Link to="/group-chat">多 Agent 群聊</Link>
+    },
+    {
+      key: '/knowledge-inbox',
+      icon: <InboxOutlined />,
+      label: <Link to="/knowledge-inbox">知识流 Inbox</Link>
     },
     {
       key: '/documents',
@@ -213,6 +220,7 @@ const AppInner: React.FC = () => {
               <Route path="/channels" element={<ChannelManager />} />
               <Route path="/mcp" element={<MCPConfig />} />
               <Route path="/group-chat" element={<GroupChat />} />
+              <Route path="/knowledge-inbox" element={<KnowledgeInbox />} />
               <Route path="/documents" element={<DocumentWorkbench />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/config" element={<Navigate to="/settings" replace />} />

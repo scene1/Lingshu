@@ -178,6 +178,24 @@ body {
   color: #b45309;
 }
 
+/* ====== 知识流 Inbox ====== */
+.knowledge-inbox-page {
+  min-height: 100%;
+}
+
+.knowledge-inbox-preview {
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 12px 14px;
+  border: 1px solid #eef2f7;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  line-height: 1.72;
+}
+
 .markdown-content .document-wiki-link-missing:hover {
   background: #fef3c7;
   color: #92400e;

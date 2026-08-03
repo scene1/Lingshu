@@ -35,6 +35,7 @@ const EXPORTS_DIR = path.join(DATA_DIR, 'exports')
 const DOCUMENT_WORKBENCH_FILE = path.join(DATA_DIR, 'document-workbench.json')
 const TOOL_RUNTIME_AUDIT_FILE = path.join(DATA_DIR, 'tool-runtime-audit.jsonl')
 const AGENT_DESKTOP_INVOCATIONS_FILE = path.join(DATA_DIR, 'agent-desktop-invocations.jsonl')
+const KNOWLEDGE_INBOX_FILE = path.join(DATA_DIR, 'knowledge-inbox.json')
 const GROUP_CHAT_DIR = path.join(CHAT_DIR, 'group-chat')
 const upload = multer({ dest: UPLOAD_DIR })
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: true })
@@ -79,6 +80,9 @@ if (!fs.existsSync(TOOL_RUNTIME_AUDIT_FILE)) {
 }
 if (!fs.existsSync(AGENT_DESKTOP_INVOCATIONS_FILE)) {
   fs.writeFileSync(AGENT_DESKTOP_INVOCATIONS_FILE, '')
+}
+if (!fs.existsSync(KNOWLEDGE_INBOX_FILE)) {
+  fs.writeFileSync(KNOWLEDGE_INBOX_FILE, JSON.stringify({ items: [], updatedAt: new Date().toISOString() }, null, 2))
 }
 if (!fs.existsSync(GROUP_CHAT_DIR)) {
   fs.mkdirSync(GROUP_CHAT_DIR, { recursive: true })
@@ -192,6 +196,7 @@ function getSystemSelfCheck() {
   const claude = getClaudeCliStatus()
   const transcription = getTranscriptionConfig()
   const documentsRouteBuilt = directoryContainsText(dist, 'DocumentWorkbench') || directoryContainsText(dist, '/api/documents')
+  const knowledgeInboxBuilt = directoryContainsText(dist, 'KnowledgeInbox') || directoryContainsText(dist, '/api/knowledge-inbox')
   const checks = [
     { key: 'app-version', label: '应用版本', ok: PACKAGE_INFO.version === '1.1.0', value: `v${PACKAGE_INFO.version}` },
     { key: 'data-root', label: '数据目录', ...checkPath('data-root', lingshuRoot, 'dir') },
@@ -199,6 +204,7 @@ function getSystemSelfCheck() {
     { key: 'config', label: '运行时配置', ...checkPath('config', configPath, 'file') },
     { key: 'dist', label: '前端构建', ok: !!dist, path: dist || '未找到 dist/index.html' },
     { key: 'documents', label: '文档工作台', ok: !!documentsRouteBuilt, value: documentsRouteBuilt ? '已包含在前端构建中' : '未在当前构建中检测到' },
+    { key: 'knowledge-inbox', label: '知识流 Inbox', ok: !!knowledgeInboxBuilt, value: knowledgeInboxBuilt ? '已包含在前端构建中' : '未在当前构建中检测到' },
     { key: 'claude-cli', label: 'Claude CLI', ok: claude.available, path: claude.path || '未检测到 claude CLI' },
     {
       key: 'transcription',
@@ -1509,6 +1515,207 @@ function saveSessionJson(filePath, sessionData, { archive = false, updateIndex =
   }
   fs.writeFileSync(filePath, JSON.stringify(nextSessionData, null, 2))
   return { sessionData: nextSessionData, archiveResult }
+}
+
+// ==================== 知识流 Inbox ====================
+
+const KNOWLEDGE_INBOX_SOURCE_TYPES = new Set(['text', 'url', 'document', 'meeting', 'conversation', 'agent-output', 'api', 'rss'])
+const KNOWLEDGE_INBOX_STATUSES = new Set(['captured', 'processed', 'ready', 'written', 'ignored'])
+
+function loadKnowledgeInbox() {
+  try {
+    const data = JSON.parse(fs.readFileSync(KNOWLEDGE_INBOX_FILE, 'utf8'))
+    return {
+      items: Array.isArray(data.items) ? data.items : [],
+      updatedAt: data.updatedAt || ''
+    }
+  } catch (_) {
+    return { items: [], updatedAt: '' }
+  }
+}
+
+function saveKnowledgeInbox(data) {
+  const next = {
+    items: Array.isArray(data.items) ? data.items.slice(0, 2000) : [],
+    updatedAt: new Date().toISOString()
+  }
+  fs.writeFileSync(KNOWLEDGE_INBOX_FILE, JSON.stringify(next, null, 2))
+  return next
+}
+
+function normalizeKnowledgeTags(tags) {
+  const values = Array.isArray(tags) ? tags : String(tags || '').split(/[,，\s#]+/)
+  return [...new Set(values
+    .map(tag => String(tag || '').replace(/^#/, '').trim().toLowerCase())
+    .filter(tag => tag && tag.length <= 32)
+    .slice(0, 16))]
+}
+
+function guessKnowledgeTitle(content, fallback = '未命名知识条目') {
+  const clean = String(content || '').replace(/\s+/g, ' ').trim()
+  if (!clean) return fallback
+  const heading = String(content || '').match(/^#{1,3}\s+(.+)$/m)?.[1]?.trim()
+  return safeDocumentTitle(heading || clean.slice(0, 48) || fallback)
+}
+
+function summarizeKnowledgeContent(content, maxLength = 180) {
+  const plain = stripMarkdownForSearch(content).replace(/\s+/g, ' ').trim()
+  if (!plain) return ''
+  const sentences = plain.split(/(?<=[。！？!?])\s*/).filter(Boolean)
+  const summary = sentences.slice(0, 3).join(' ').trim() || plain
+  return summary.length > maxLength ? `${summary.slice(0, maxLength)}…` : summary
+}
+
+function extractKnowledgeEntities(content) {
+  const text = String(content || '')
+  const cjkTerms = [...text.matchAll(/(?:“([^”]{2,24})”|《([^》]{2,24})》)/g)]
+    .map(match => match[1] || match[2])
+  const latinTerms = text.match(/\b[A-Z][A-Za-z0-9+_.-]{2,}\b/g) || []
+  const mixedTerms = text.match(/\b(?:AI|API|MCP|CLI|RSS|Obsidian|Codex|Claude|Lingshu|灵枢|Vault)\b/gi) || []
+  return [...new Set([...cjkTerms, ...latinTerms, ...mixedTerms]
+    .map(item => String(item || '').trim())
+    .filter(Boolean))]
+    .slice(0, 16)
+}
+
+function inferKnowledgeTags(content, sourceType = '') {
+  const text = String(content || '').toLowerCase()
+  const tags = ['inbox']
+  const rules = [
+    [/会议|纪要|转写|录音|meeting/, 'meeting'],
+    [/agent|智能体|codex|claude|mcp|cli/, 'agent'],
+    [/obsidian|vault|知识库|markdown|md\b/, 'knowledge-base'],
+    [/产品|需求|roadmap|方案/, 'product'],
+    [/代码|github|repo|构建|发布|bug|error|报错/, 'engineering'],
+    [/rss|新闻|资讯|article|网页|url|http/, 'web'],
+    [/记忆|memory|同步/, 'memory']
+  ]
+  for (const [pattern, tag] of rules) {
+    if (pattern.test(text)) tags.push(tag)
+  }
+  if (sourceType && sourceType !== 'text') tags.push(sourceType)
+  return normalizeKnowledgeTags(tags)
+}
+
+function normalizeKnowledgeInboxItem(input, previous = {}) {
+  const now = new Date().toISOString()
+  const sourceType = KNOWLEDGE_INBOX_SOURCE_TYPES.has(String(input.sourceType || previous.sourceType || 'text'))
+    ? String(input.sourceType || previous.sourceType || 'text')
+    : 'text'
+  const status = KNOWLEDGE_INBOX_STATUSES.has(String(input.status || previous.status || 'captured'))
+    ? String(input.status || previous.status || 'captured')
+    : 'captured'
+  const content = String(input.content ?? previous.content ?? '').slice(0, 200000)
+  const title = safeDocumentTitle(input.title || previous.title || guessKnowledgeTitle(content))
+  const tags = normalizeKnowledgeTags(input.tags !== undefined ? input.tags : previous.tags || inferKnowledgeTags(content, sourceType))
+  return {
+    id: previous.id || input.id || `kin_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+    title,
+    sourceType,
+    sourceUrl: String(input.sourceUrl ?? previous.sourceUrl ?? '').trim(),
+    content,
+    summary: String(input.summary ?? previous.summary ?? '').trim(),
+    tags,
+    entities: Array.isArray(input.entities) ? input.entities : (Array.isArray(previous.entities) ? previous.entities : []),
+    status,
+    priority: String(input.priority || previous.priority || 'normal'),
+    vaultRelativePath: input.vaultRelativePath || previous.vaultRelativePath || '',
+    feedback: previous.feedback || input.feedback || null,
+    createdAt: previous.createdAt || input.createdAt || now,
+    updatedAt: now,
+    processedAt: input.processedAt || previous.processedAt || '',
+    writtenAt: input.writtenAt || previous.writtenAt || ''
+  }
+}
+
+function processKnowledgeInboxItem(item) {
+  const summary = summarizeKnowledgeContent(item.content)
+  const tags = normalizeKnowledgeTags([...(item.tags || []), ...inferKnowledgeTags(item.content, item.sourceType)])
+  const entities = extractKnowledgeEntities(item.content)
+  return {
+    ...item,
+    summary,
+    tags,
+    entities,
+    status: 'processed',
+    processedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }
+}
+
+function formatKnowledgeInboxMarkdown(item) {
+  const now = new Date().toISOString()
+  const frontmatter = [
+    '---',
+    `id: ${item.id}`,
+    'type: knowledge-inbox',
+    'source: lingshu',
+    `source_type: ${JSON.stringify(item.sourceType || 'text')}`,
+    item.sourceUrl ? `source_url: ${JSON.stringify(item.sourceUrl)}` : '',
+    `status: ${JSON.stringify(item.status || 'processed')}`,
+    `created_at: ${item.createdAt || now}`,
+    `updated_at: ${now}`,
+    `tags: [${normalizeKnowledgeTags(item.tags).map(tag => JSON.stringify(tag)).join(', ')}]`,
+    Array.isArray(item.entities) && item.entities.length > 0 ? `entities: [${item.entities.map(entity => JSON.stringify(entity)).join(', ')}]` : '',
+    '---'
+  ].filter(Boolean).join('\n')
+
+  return [
+    frontmatter,
+    '',
+    `# ${safeDocumentTitle(item.title)}`,
+    '',
+    item.summary ? `> ${item.summary}` : '',
+    '',
+    '## 原始内容',
+    '',
+    String(item.content || '').trim() || '_空内容_',
+    '',
+    '## 处理记录',
+    '',
+    `- 来源类型：${item.sourceType || 'text'}`,
+    item.sourceUrl ? `- 来源链接：${item.sourceUrl}` : '',
+    `- 捕获时间：${item.createdAt || now}`,
+    item.processedAt ? `- 处理时间：${item.processedAt}` : '',
+    `- 写入时间：${now}`
+  ].filter(line => line !== '').join('\n') + '\n'
+}
+
+function writeKnowledgeInboxItemToVault(item, folder = '00_Inbox/灵枢知识流') {
+  const vault = getMarkdownVaultConfig()
+  if (!vault.ok) throw new Error(vault.reason)
+  ensureLingshuVaultContract(vault.config)
+  const normalizedFolder = normalizeVaultRelativePath(folder || '00_Inbox/灵枢知识流', { allowEmpty: true }) || '00_Inbox/灵枢知识流'
+  const targetDir = path.resolve(vault.config.vaultPath, normalizedFolder)
+  if (!isPathInside(vault.config.vaultPath, targetDir)) throw new Error('非法 Inbox 写入目录')
+  fs.mkdirSync(targetDir, { recursive: true })
+
+  const date = String(item.createdAt || new Date().toISOString()).slice(0, 10)
+  const base = `${date}-${safeDocumentTitle(item.title)}`
+  let filePath = path.join(targetDir, `${base}.md`)
+  let suffix = 2
+  while (fs.existsSync(filePath)) {
+    filePath = path.join(targetDir, `${base}-${suffix}.md`)
+    suffix += 1
+  }
+  atomicWriteTextFile(filePath, formatKnowledgeInboxMarkdown(item))
+  return {
+    absolutePath: filePath,
+    relativePath: path.relative(vault.config.vaultPath, filePath).split(path.sep).join('/')
+  }
+}
+
+function filterKnowledgeInboxItems(items, { status = '', sourceType = '', q = '' } = {}) {
+  const query = String(q || '').trim().toLowerCase()
+  return items.filter(item => {
+    if (status && item.status !== status) return false
+    if (sourceType && item.sourceType !== sourceType) return false
+    if (!query) return true
+    const haystack = [item.title, item.summary, item.content, item.sourceUrl, ...(item.tags || []), ...(item.entities || [])]
+      .join('\n')
+      .toLowerCase()
+    return haystack.includes(query)
+  })
 }
 
 function escapeHtml(value) {
@@ -4902,6 +5109,141 @@ app.post('/api/memory/sync-to-obsidian', (req, res) => {
     res.json(syncMemoriesToObsidian({ keys, includeSynced }))
   } catch (error) {
     res.status(500).json({ error: '同步记忆到知识库失败', message: error.message })
+  }
+})
+
+app.get('/api/knowledge-inbox', (req, res) => {
+  try {
+    const data = loadKnowledgeInbox()
+    const items = filterKnowledgeInboxItems(data.items, {
+      status: String(req.query.status || ''),
+      sourceType: String(req.query.sourceType || ''),
+      q: String(req.query.q || '')
+    }).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+    const stats = data.items.reduce((acc, item) => {
+      acc.total += 1
+      acc.status[item.status] = (acc.status[item.status] || 0) + 1
+      acc.sourceType[item.sourceType] = (acc.sourceType[item.sourceType] || 0) + 1
+      return acc
+    }, { total: 0, status: {}, sourceType: {} })
+    res.json({ items, stats, updatedAt: data.updatedAt })
+  } catch (error) {
+    res.status(500).json({ error: '读取知识流 Inbox 失败', message: error.message })
+  }
+})
+
+app.post('/api/knowledge-inbox', (req, res) => {
+  try {
+    const input = req.body || {}
+    if (!String(input.content || '').trim()) return res.status(400).json({ error: 'content 为必填' })
+    const data = loadKnowledgeInbox()
+    const item = normalizeKnowledgeInboxItem(input)
+    data.items = [item, ...data.items]
+    saveKnowledgeInbox(data)
+    res.json({ success: true, item })
+  } catch (error) {
+    res.status(400).json({ error: '创建知识流条目失败', message: error.message })
+  }
+})
+
+app.patch('/api/knowledge-inbox/:id', (req, res) => {
+  try {
+    const data = loadKnowledgeInbox()
+    const index = data.items.findIndex(item => item.id === req.params.id)
+    if (index < 0) return res.status(404).json({ error: '知识流条目不存在' })
+    const item = normalizeKnowledgeInboxItem(req.body || {}, data.items[index])
+    data.items[index] = item
+    saveKnowledgeInbox(data)
+    res.json({ success: true, item })
+  } catch (error) {
+    res.status(400).json({ error: '更新知识流条目失败', message: error.message })
+  }
+})
+
+app.delete('/api/knowledge-inbox/:id', (req, res) => {
+  try {
+    const data = loadKnowledgeInbox()
+    const before = data.items.length
+    data.items = data.items.filter(item => item.id !== req.params.id)
+    saveKnowledgeInbox(data)
+    res.json({ success: true, deleted: before - data.items.length })
+  } catch (error) {
+    res.status(500).json({ error: '删除知识流条目失败', message: error.message })
+  }
+})
+
+app.post('/api/knowledge-inbox/:id/process', (req, res) => {
+  try {
+    const data = loadKnowledgeInbox()
+    const index = data.items.findIndex(item => item.id === req.params.id)
+    if (index < 0) return res.status(404).json({ error: '知识流条目不存在' })
+    const processed = processKnowledgeInboxItem(data.items[index])
+    data.items[index] = processed
+    saveKnowledgeInbox(data)
+    res.json({ success: true, item: processed })
+  } catch (error) {
+    res.status(400).json({ error: '处理知识流条目失败', message: error.message })
+  }
+})
+
+app.post('/api/knowledge-inbox/process-batch', (req, res) => {
+  try {
+    const { ids = [] } = req.body || {}
+    const selected = new Set(Array.isArray(ids) ? ids.map(String) : [])
+    const data = loadKnowledgeInbox()
+    let count = 0
+    data.items = data.items.map(item => {
+      if (selected.size > 0 && !selected.has(item.id)) return item
+      if (item.status === 'written' || item.status === 'ignored') return item
+      count += 1
+      return processKnowledgeInboxItem(item)
+    })
+    saveKnowledgeInbox(data)
+    res.json({ success: true, count, items: data.items })
+  } catch (error) {
+    res.status(400).json({ error: '批量处理知识流失败', message: error.message })
+  }
+})
+
+app.post('/api/knowledge-inbox/:id/write-to-vault', (req, res) => {
+  try {
+    const data = loadKnowledgeInbox()
+    const index = data.items.findIndex(item => item.id === req.params.id)
+    if (index < 0) return res.status(404).json({ error: '知识流条目不存在' })
+    const source = data.items[index].status === 'captured'
+      ? processKnowledgeInboxItem(data.items[index])
+      : data.items[index]
+    const written = writeKnowledgeInboxItemToVault(source, req.body?.folder)
+    const item = {
+      ...source,
+      status: 'written',
+      vaultRelativePath: written.relativePath,
+      writtenAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+    data.items[index] = item
+    saveKnowledgeInbox(data)
+    res.json({ success: true, item, vault: written })
+  } catch (error) {
+    res.status(400).json({ error: '写入知识库失败', message: error.message })
+  }
+})
+
+app.post('/api/knowledge-inbox/:id/feedback', (req, res) => {
+  try {
+    const data = loadKnowledgeInbox()
+    const index = data.items.findIndex(item => item.id === req.params.id)
+    if (index < 0) return res.status(404).json({ error: '知识流条目不存在' })
+    const feedback = {
+      value: ['useful', 'useless', 'accepted', 'rejected'].includes(req.body?.value) ? req.body.value : 'useful',
+      note: String(req.body?.note || '').slice(0, 500),
+      at: new Date().toISOString()
+    }
+    data.items[index] = { ...data.items[index], feedback, updatedAt: new Date().toISOString() }
+    saveKnowledgeInbox(data)
+    res.json({ success: true, item: data.items[index] })
+  } catch (error) {
+    res.status(400).json({ error: '保存反馈失败', message: error.message })
   }
 })
 
