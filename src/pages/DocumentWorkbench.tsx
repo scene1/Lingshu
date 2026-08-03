@@ -117,10 +117,16 @@ interface DocumentOutlineItem {
 }
 
 interface DocumentFrontMatter {
+  id: string
+  schemaVersion: number
+  type: string
+  source: string
   tags: string[]
   status: string
   created: string
   updated: string
+  createdAt: string
+  updatedAt: string
   extra: Record<string, string | string[]>
   hasFrontMatter: boolean
 }
@@ -296,8 +302,28 @@ const parseYamlValue = (value: string) => {
   return stripYamlQuotes(clean)
 }
 
+const normalizeDocumentTags = (tags: unknown) => {
+  const source = Array.isArray(tags) ? tags : String(tags || '').split(/[,\s]+/)
+  return [...new Set(source.map(tag => String(tag || '').replace(/^#/, '').trim()).filter(Boolean))]
+}
+
+const frontMatterScalar = (parsed: string | string[]) => Array.isArray(parsed) ? parsed[0] || '' : String(parsed || '')
+
 const parseDocumentFrontMatter = (markdown: string): { frontMatter: DocumentFrontMatter; body: string } => {
-  const empty: DocumentFrontMatter = { tags: [], status: '', created: '', updated: '', extra: {}, hasFrontMatter: false }
+  const empty: DocumentFrontMatter = {
+    id: '',
+    schemaVersion: 1,
+    type: '',
+    source: '',
+    tags: [],
+    status: '',
+    created: '',
+    updated: '',
+    createdAt: '',
+    updatedAt: '',
+    extra: {},
+    hasFrontMatter: false
+  }
   if (!String(markdown || '').startsWith('---\n')) return { frontMatter: empty, body: markdown }
   const lines = markdown.split('\n')
   const endIndex = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
@@ -326,14 +352,18 @@ const parseDocumentFrontMatter = (markdown: string): { frontMatter: DocumentFron
         index = cursor - 1
       }
     }
-    if (lowerKey === 'tags') {
-      frontMatter.tags = Array.isArray(parsed) ? parsed : String(parsed || '').split(/[,\s]+/).filter(Boolean)
-    } else if (lowerKey === 'status') {
-      frontMatter.status = Array.isArray(parsed) ? parsed.join(', ') : String(parsed || '')
-    } else if (lowerKey === 'created') {
-      frontMatter.created = Array.isArray(parsed) ? parsed[0] || '' : String(parsed || '')
-    } else if (lowerKey === 'updated') {
-      frontMatter.updated = Array.isArray(parsed) ? parsed[0] || '' : String(parsed || '')
+    if (lowerKey === 'id') frontMatter.id = frontMatterScalar(parsed)
+    else if (lowerKey === 'schema_version') frontMatter.schemaVersion = Number(frontMatterScalar(parsed)) || 1
+    else if (lowerKey === 'type') frontMatter.type = frontMatterScalar(parsed)
+    else if (lowerKey === 'source') frontMatter.source = frontMatterScalar(parsed)
+    else if (lowerKey === 'tags') frontMatter.tags = normalizeDocumentTags(parsed)
+    else if (lowerKey === 'status') frontMatter.status = frontMatterScalar(parsed)
+    else if (lowerKey === 'created' || lowerKey === 'created_at') {
+      frontMatter.createdAt = frontMatterScalar(parsed)
+      frontMatter.created = frontMatter.createdAt
+    } else if (lowerKey === 'updated' || lowerKey === 'updated_at') {
+      frontMatter.updatedAt = frontMatterScalar(parsed)
+      frontMatter.updated = frontMatter.updatedAt
     } else {
       frontMatter.extra[key] = parsed
     }
@@ -349,16 +379,23 @@ const serializeYamlScalar = (value: string) => {
 }
 
 const serializeDocumentFrontMatter = (frontMatter: DocumentFrontMatter, body: string) => {
+  const now = new Date().toISOString()
+  const createdAt = frontMatter.createdAt || frontMatter.created || now
+  const updatedAt = frontMatter.updatedAt || frontMatter.updated || createdAt
   const lines = ['---']
+  lines.push(`id: ${serializeYamlScalar(frontMatter.id || `doc_${Date.now()}`)}`)
+  lines.push(`schema_version: ${frontMatter.schemaVersion || 1}`)
+  lines.push(`type: ${serializeYamlScalar(frontMatter.type || 'note')}`)
+  lines.push(`status: ${serializeYamlScalar(frontMatter.status || 'draft')}`)
+  lines.push(`source: ${serializeYamlScalar(frontMatter.source || 'lingshu-document-workbench')}`)
+  lines.push(`created_at: ${serializeYamlScalar(createdAt)}`)
+  lines.push(`updated_at: ${serializeYamlScalar(updatedAt)}`)
   if (frontMatter.tags.length > 0) {
     lines.push('tags:')
     frontMatter.tags.forEach(tag => lines.push(`  - ${serializeYamlScalar(tag)}`))
   }
-  if (frontMatter.status.trim()) lines.push(`status: ${serializeYamlScalar(frontMatter.status)}`)
-  if (frontMatter.created.trim()) lines.push(`created: ${serializeYamlScalar(frontMatter.created)}`)
-  if (frontMatter.updated.trim()) lines.push(`updated: ${serializeYamlScalar(frontMatter.updated)}`)
   Object.entries(frontMatter.extra).forEach(([key, value]) => {
-    if (['tags', 'status', 'created', 'updated'].includes(key.toLowerCase())) return
+    if (['id', 'schema_version', 'type', 'status', 'source', 'created', 'updated', 'created_at', 'updated_at', 'tags'].includes(key.toLowerCase())) return
     if (Array.isArray(value)) {
       lines.push(`${key}:`)
       value.forEach(item => lines.push(`  - ${serializeYamlScalar(item)}`))
@@ -928,10 +965,16 @@ const DocumentWorkbench: React.FC = () => {
   const ensureFrontMatter = () => {
     const today = new Date().toISOString().slice(0, 10)
     updateFrontMatter({
+      id: frontMatter.id || `doc_${Date.now()}`,
+      schemaVersion: frontMatter.schemaVersion || 1,
+      type: frontMatter.type || 'note',
+      source: frontMatter.source || 'lingshu-document-workbench',
       tags: frontMatter.tags,
       status: frontMatter.status || 'draft',
-      created: frontMatter.created || today,
+      created: frontMatter.createdAt || frontMatter.created || today,
       updated: today,
+      createdAt: frontMatter.createdAt || frontMatter.created || today,
+      updatedAt: today,
       extra: frontMatter.extra
     })
     message.success('已补全基础文档属性')
@@ -1909,10 +1952,38 @@ const DocumentWorkbench: React.FC = () => {
                                     type="info"
                                     showIcon
                                     message="当前文档还没有 YAML Front Matter"
-                                    description="点击补全后，会在文档顶部写入 tags/status/created/updated 字段。"
+                                    description="点击补全后，会在文档顶部写入 id/schema_version/type/status/source/tags/created_at/updated_at 字段。"
                                     action={<Button size="small" type="primary" onClick={ensureFrontMatter}>补全</Button>}
                                   />
                                 )}
+                                <div className="document-property-grid">
+                                  <div className="document-property-field">
+                                    <Text strong>ID</Text>
+                                    <Input value={frontMatter.id} placeholder="doc_xxx" onChange={event => updateFrontMatter({ id: event.target.value })} />
+                                  </div>
+                                  <div className="document-property-field">
+                                    <Text strong>Type</Text>
+                                    <Select
+                                      value={frontMatter.type || undefined}
+                                      placeholder="选择文档类型"
+                                      style={{ width: '100%' }}
+                                      onChange={value => updateFrontMatter({ type: value || 'note' })}
+                                      options={[
+                                        { value: 'note', label: 'note' },
+                                        { value: 'knowledge-inbox', label: 'knowledge-inbox' },
+                                        { value: 'meeting-minutes', label: 'meeting-minutes' },
+                                        { value: 'conversation', label: 'conversation' },
+                                        { value: 'memory', label: 'memory' },
+                                        { value: 'project', label: 'project' },
+                                        { value: 'resource', label: 'resource' }
+                                      ]}
+                                    />
+                                  </div>
+                                </div>
+                                <div className="document-property-field">
+                                  <Text strong>Source</Text>
+                                  <Input value={frontMatter.source} placeholder="lingshu / obsidian / imported" onChange={event => updateFrontMatter({ source: event.target.value })} />
+                                </div>
                                 <div className="document-property-field">
                                   <Text strong>Tags</Text>
                                   <Select
@@ -1944,17 +2015,17 @@ const DocumentWorkbench: React.FC = () => {
                                   <div className="document-property-field">
                                     <Text strong>Created</Text>
                                     <Input
-                                      value={frontMatter.created}
+                                      value={frontMatter.createdAt || frontMatter.created}
                                       placeholder="YYYY-MM-DD"
-                                      onChange={event => updateFrontMatter({ created: event.target.value })}
+                                      onChange={event => updateFrontMatter({ created: event.target.value, createdAt: event.target.value })}
                                     />
                                   </div>
                                   <div className="document-property-field">
                                     <Text strong>Updated</Text>
                                     <Input
-                                      value={frontMatter.updated}
+                                      value={frontMatter.updatedAt || frontMatter.updated}
                                       placeholder="YYYY-MM-DD"
-                                      onChange={event => updateFrontMatter({ updated: event.target.value })}
+                                      onChange={event => updateFrontMatter({ updated: event.target.value, updatedAt: event.target.value })}
                                     />
                                   </div>
                                 </div>

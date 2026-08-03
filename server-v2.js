@@ -37,6 +37,7 @@ const DOCUMENT_WORKBENCH_FILE = path.join(DATA_DIR, 'document-workbench.json')
 const TOOL_RUNTIME_AUDIT_FILE = path.join(DATA_DIR, 'tool-runtime-audit.jsonl')
 const AGENT_DESKTOP_INVOCATIONS_FILE = path.join(DATA_DIR, 'agent-desktop-invocations.jsonl')
 const KNOWLEDGE_INBOX_FILE = path.join(DATA_DIR, 'knowledge-inbox.json')
+const LINGSHU_FRONTMATTER_SCHEMA_VERSION = 1
 const GROUP_CHAT_DIR = path.join(CHAT_DIR, 'group-chat')
 const upload = multer({ dest: UPLOAD_DIR })
 const markdownRenderer = new MarkdownIt({ html: false, linkify: true, typographer: true })
@@ -963,8 +964,88 @@ function parseYamlValue(value) {
   return stripYamlQuotes(clean)
 }
 
+function normalizeMarkdownTags(tags = []) {
+  const source = Array.isArray(tags) ? tags : String(tags || '').split(/[,\s]+/)
+  return [...new Set(source
+    .map(tag => String(tag || '').replace(/^#/, '').trim())
+    .filter(Boolean)
+  )]
+}
+
+function frontMatterScalar(parsed) {
+  return Array.isArray(parsed) ? String(parsed[0] || '') : String(parsed || '')
+}
+
+function normalizeLingshuFrontMatter(input = {}) {
+  const now = new Date().toISOString()
+  const createdAt = input.createdAt || input.created_at || input.created || ''
+  const updatedAt = input.updatedAt || input.updated_at || input.updated || ''
+  return {
+    id: String(input.id || '').trim(),
+    schemaVersion: Number(input.schemaVersion || input.schema_version || LINGSHU_FRONTMATTER_SCHEMA_VERSION) || LINGSHU_FRONTMATTER_SCHEMA_VERSION,
+    type: String(input.type || 'note').trim() || 'note',
+    status: String(input.status || 'draft').trim() || 'draft',
+    source: String(input.source || 'lingshu').trim() || 'lingshu',
+    tags: normalizeMarkdownTags(input.tags || []),
+    createdAt: String(createdAt || now),
+    updatedAt: String(updatedAt || createdAt || now),
+    created: String(createdAt || now),
+    updated: String(updatedAt || createdAt || now),
+    extra: input.extra || {},
+    hasFrontMatter: !!input.hasFrontMatter
+  }
+}
+
+function yamlScalar(value) {
+  const clean = String(value ?? '').trim()
+  if (!clean) return ''
+  return /[:#[\]{}&,*>!|'"%@`\n]/.test(clean) ? JSON.stringify(clean) : clean
+}
+
+function appendYamlField(lines, key, value) {
+  if (value === undefined || value === null || String(value).trim() === '') return
+  lines.push(`${key}: ${yamlScalar(value)}`)
+}
+
+function appendYamlArray(lines, key, values) {
+  const list = normalizeMarkdownTags(values)
+  if (list.length === 0) return
+  lines.push(`${key}:`)
+  list.forEach(item => lines.push(`  - ${yamlScalar(item)}`))
+}
+
+function buildLingshuFrontMatter(input = {}) {
+  const meta = normalizeLingshuFrontMatter(input)
+  const lines = ['---']
+  appendYamlField(lines, 'id', meta.id || `doc_${Date.now()}`)
+  appendYamlField(lines, 'schema_version', meta.schemaVersion)
+  appendYamlField(lines, 'type', meta.type)
+  appendYamlField(lines, 'status', meta.status)
+  appendYamlField(lines, 'source', meta.source)
+  appendYamlField(lines, 'created_at', meta.createdAt)
+  appendYamlField(lines, 'updated_at', meta.updatedAt)
+  appendYamlArray(lines, 'tags', meta.tags)
+  Object.entries(input.extra || {}).forEach(([key, value]) => {
+    if (['id', 'schema_version', 'type', 'status', 'source', 'created', 'updated', 'created_at', 'updated_at', 'tags'].includes(String(key).toLowerCase())) return
+    if (Array.isArray(value)) {
+      lines.push(`${key}:`)
+      value.filter(item => String(item || '').trim()).forEach(item => lines.push(`  - ${yamlScalar(item)}`))
+    } else {
+      appendYamlField(lines, key, value)
+    }
+  })
+  lines.push('---')
+  return lines.join('\n')
+}
+
+function ensureLingshuFrontMatter(raw, input = {}) {
+  const text = String(raw || '').trimStart()
+  if (text.startsWith('---\n')) return raw
+  return `${buildLingshuFrontMatter(input)}\n\n${String(raw || '').replace(/^\n+/, '')}`
+}
+
 function parseMarkdownFrontMatter(raw) {
-  const empty = { tags: [], status: '', created: '', updated: '', extra: {}, hasFrontMatter: false }
+  const empty = { id: '', schemaVersion: LINGSHU_FRONTMATTER_SCHEMA_VERSION, type: '', source: '', tags: [], status: '', created: '', updated: '', createdAt: '', updatedAt: '', extra: {}, hasFrontMatter: false }
   if (!String(raw || '').startsWith('---\n')) return empty
   const lines = String(raw || '').split('\n')
   const endIndex = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
@@ -992,14 +1073,18 @@ function parseMarkdownFrontMatter(raw) {
         index = cursor - 1
       }
     }
-    if (lowerKey === 'tags') {
-      frontMatter.tags = Array.isArray(parsed) ? parsed : String(parsed || '').split(/[,\s]+/).filter(Boolean)
-    } else if (lowerKey === 'status') {
-      frontMatter.status = Array.isArray(parsed) ? parsed.join(', ') : String(parsed || '')
-    } else if (lowerKey === 'created') {
-      frontMatter.created = Array.isArray(parsed) ? parsed[0] || '' : String(parsed || '')
-    } else if (lowerKey === 'updated') {
-      frontMatter.updated = Array.isArray(parsed) ? parsed[0] || '' : String(parsed || '')
+    if (lowerKey === 'id') frontMatter.id = frontMatterScalar(parsed)
+    else if (lowerKey === 'schema_version') frontMatter.schemaVersion = Number(frontMatterScalar(parsed)) || LINGSHU_FRONTMATTER_SCHEMA_VERSION
+    else if (lowerKey === 'type') frontMatter.type = frontMatterScalar(parsed)
+    else if (lowerKey === 'source') frontMatter.source = frontMatterScalar(parsed)
+    else if (lowerKey === 'tags') frontMatter.tags = normalizeMarkdownTags(parsed)
+    else if (lowerKey === 'status') frontMatter.status = frontMatterScalar(parsed)
+    else if (lowerKey === 'created' || lowerKey === 'created_at') {
+      frontMatter.createdAt = frontMatterScalar(parsed)
+      frontMatter.created = frontMatter.createdAt
+    } else if (lowerKey === 'updated' || lowerKey === 'updated_at') {
+      frontMatter.updatedAt = frontMatterScalar(parsed)
+      frontMatter.updated = frontMatter.updatedAt
     } else {
       frontMatter.extra[key] = parsed
     }
@@ -1074,6 +1159,11 @@ function ensureMarkdownSearchIndexSchema() {
     '  absolute_path TEXT NOT NULL,',
     '  title TEXT,',
     '  tags TEXT,',
+    '  doc_id TEXT,',
+    '  doc_type TEXT,',
+    '  source TEXT,',
+    '  status TEXT,',
+    '  created_at TEXT,',
     '  headings TEXT,',
     '  mtime TEXT,',
     '  size INTEGER,',
@@ -1090,6 +1180,18 @@ function ensureMarkdownSearchIndexSchema() {
     ');',
     'CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT);'
   ].join('\n'))
+  for (const [column, definition] of [
+    ['doc_id', 'TEXT'],
+    ['doc_type', 'TEXT'],
+    ['source', 'TEXT'],
+    ['status', 'TEXT'],
+    ['created_at', 'TEXT']
+  ]) {
+    try {
+      const columns = sqliteJsonIndex('PRAGMA table_info(vault_files)')
+      if (!columns.some(item => item.name === column)) sqliteRunIndex(`ALTER TABLE vault_files ADD COLUMN ${column} ${definition};`)
+    } catch (_) {}
+  }
   return { available: true, reason: '' }
 }
 
@@ -1101,26 +1203,32 @@ function loadMarkdownIndexRows() {
 }
 
 function upsertMarkdownIndexNote(note) {
+  const meta = normalizeLingshuFrontMatter(note.frontMatter || {})
   const indexedBody = [
     note.plain,
-    tokenizeSearchText([note.title, note.relativePath, note.tags.join(' '), note.headings.join(' '), note.plain].join('\n')).join(' ')
+    tokenizeSearchText([note.title, note.relativePath, note.tags.join(' '), note.headings.join(' '), meta.type, meta.status, meta.source, note.plain].join('\n')).join(' ')
   ].join('\n')
   sqliteRunIndex([
     'BEGIN;',
     'DELETE FROM vault_files WHERE relative_path = ' + sqlQuote(note.relativePath) + ';',
     'DELETE FROM vault_fts WHERE relative_path = ' + sqlQuote(note.relativePath) + ';',
-    'INSERT INTO vault_files(relative_path, absolute_path, title, tags, headings, mtime, size, hash, plain, updated_at) VALUES (',
+    'INSERT INTO vault_files(relative_path, absolute_path, title, tags, doc_id, doc_type, source, status, created_at, headings, mtime, size, hash, plain, updated_at) VALUES (',
     [
       sqlQuote(note.relativePath),
       sqlQuote(note.filePath),
       sqlQuote(note.title),
       sqlQuote(JSON.stringify(note.tags || [])),
+      sqlQuote(meta.id),
+      sqlQuote(meta.type),
+      sqlQuote(meta.source),
+      sqlQuote(meta.status),
+      sqlQuote(meta.createdAt),
       sqlQuote(JSON.stringify(note.headings || [])),
       sqlQuote(note.mtime),
       Number(fs.statSync(note.filePath).size) || 0,
       sqlQuote(hashContent(note.raw || '')),
       sqlQuote(note.plain || ''),
-      sqlQuote(new Date().toISOString())
+      sqlQuote(meta.updatedAt || new Date().toISOString())
     ].join(', '),
     ');',
     'INSERT INTO vault_fts(relative_path, title, tags, headings, body) VALUES (',
@@ -1400,16 +1508,15 @@ function writeObsidianMemoryNote({ title, content, tags = [] }) {
   }
 
   const tagList = Array.isArray(tags) ? tags.map(tag => String(tag).replace(/^#/, '').trim()).filter(Boolean) : []
-  const frontmatter = [
-    '---',
-    `id: lingshu-${Date.now()}`,
-    'type: memory',
-    'source: lingshu',
-    `created_at: ${now.toISOString()}`,
-    `updated_at: ${now.toISOString()}`,
-    `tags: [${['lingshu-memory', ...tagList].map(tag => `"${tag}"`).join(', ')}]`,
-    '---'
-  ].join('\n')
+  const frontmatter = buildLingshuFrontMatter({
+    id: `lingshu-${Date.now()}`,
+    type: 'memory',
+    status: 'active',
+    source: 'lingshu',
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    tags: ['lingshu-memory', ...tagList]
+  })
 
   atomicWriteTextFile(filePath, `${frontmatter}\n\n# ${safeTitle}\n\n${String(content || '').trim()}\n`)
   return {
@@ -1622,20 +1729,21 @@ function formatConversationMarkdown(sessionData, instance = null) {
   const createdAt = sessionData.createdAt || new Date().toISOString()
   const updatedAt = sessionData.updatedAt || createdAt
   const messages = Array.isArray(sessionData.messages) ? sessionData.messages : []
-  const frontmatter = [
-    '---',
-    `id: ${sessionData.id || `session-${Date.now()}`}`,
-    'type: conversation',
-    'source: lingshu',
-    `instance_id: ${sessionData.instanceId || ''}`,
-    instance?.name ? `instance_name: ${JSON.stringify(instance.name)}` : '',
-    sessionData.model ? `model: ${JSON.stringify(sessionData.model)}` : '',
-    `created_at: ${createdAt}`,
-    `updated_at: ${updatedAt}`,
-    `message_count: ${messages.length}`,
-    'tags: ["codex", "conversation", "lingshu"]',
-    '---'
-  ].filter(Boolean).join('\n')
+  const frontmatter = buildLingshuFrontMatter({
+    id: sessionData.id || `session-${Date.now()}`,
+    type: 'conversation',
+    status: 'archived',
+    source: 'lingshu',
+    createdAt,
+    updatedAt,
+    tags: ['codex', 'conversation', 'lingshu'],
+    extra: {
+      instance_id: sessionData.instanceId || '',
+      instance_name: instance?.name || '',
+      model: sessionData.model || '',
+      message_count: messages.length
+    }
+  })
 
   const header = [
     frontmatter,
@@ -1900,20 +2008,20 @@ function processKnowledgeInboxItem(item) {
 
 function formatKnowledgeInboxMarkdown(item) {
   const now = new Date().toISOString()
-  const frontmatter = [
-    '---',
-    `id: ${item.id}`,
-    'type: knowledge-inbox',
-    'source: lingshu',
-    `source_type: ${JSON.stringify(item.sourceType || 'text')}`,
-    item.sourceUrl ? `source_url: ${JSON.stringify(item.sourceUrl)}` : '',
-    `status: ${JSON.stringify(item.status || 'processed')}`,
-    `created_at: ${item.createdAt || now}`,
-    `updated_at: ${now}`,
-    `tags: [${normalizeKnowledgeTags(item.tags).map(tag => JSON.stringify(tag)).join(', ')}]`,
-    Array.isArray(item.entities) && item.entities.length > 0 ? `entities: [${item.entities.map(entity => JSON.stringify(entity)).join(', ')}]` : '',
-    '---'
-  ].filter(Boolean).join('\n')
+  const frontmatter = buildLingshuFrontMatter({
+    id: item.id,
+    type: 'knowledge-inbox',
+    status: item.status || 'processed',
+    source: 'lingshu',
+    createdAt: item.createdAt || now,
+    updatedAt: now,
+    tags: normalizeKnowledgeTags(item.tags),
+    extra: {
+      source_type: item.sourceType || 'text',
+      source_url: item.sourceUrl || '',
+      entities: Array.isArray(item.entities) ? item.entities : []
+    }
+  })
 
   return [
     frontmatter,
@@ -2168,8 +2276,9 @@ function listDocumentProperties(config, { tags = [], status = '', query = '', ma
       if (!isPathInside(config.vaultPath, filePath)) continue
       const note = readObsidianNote(filePath, config)
       if (!note) continue
+      const meta = normalizeLingshuFrontMatter(note.frontMatter || {})
       const docTags = [...new Set(note.tags)].filter(Boolean)
-      const docStatus = String(note.frontMatter?.status || '').trim()
+      const docStatus = meta.status
       docTags.forEach(tag => tagFacet.set(tag, (tagFacet.get(tag) || 0) + 1))
       if (docStatus) statusFacet.set(docStatus, (statusFacet.get(docStatus) || 0) + 1)
 
@@ -2179,13 +2288,18 @@ function listDocumentProperties(config, { tags = [], status = '', query = '', ma
       if (cleanQuery && !`${note.title} ${note.relativePath}`.toLowerCase().includes(cleanQuery)) continue
 
       documents.push({
+        id: meta.id,
         title: note.title,
         path: note.relativePath,
         relativePath: note.relativePath,
+        type: meta.type,
+        source: meta.source,
         tags: docTags,
         status: docStatus,
-        created: note.frontMatter?.created || '',
-        updated: note.frontMatter?.updated || '',
+        created: meta.createdAt,
+        updated: meta.updatedAt,
+        createdAt: meta.createdAt,
+        updatedAt: meta.updatedAt,
         hasFrontMatter: !!note.frontMatter?.hasFrontMatter,
         mtime: note.mtime
       })
@@ -2758,13 +2872,18 @@ function listMeetings() {
 
 function buildFallbackMinutes({ title, transcript, audioPath }) {
   const now = new Date().toISOString()
+  const frontmatter = buildLingshuFrontMatter({
+    id: `meeting_${Date.now()}`,
+    type: 'meeting-minutes',
+    status: transcript ? 'draft' : 'recorded',
+    source: 'lingshu-document-workbench',
+    createdAt: now,
+    updatedAt: now,
+    tags: ['meeting', 'minutes'],
+    extra: { audio_path: audioPath || '' }
+  })
   const lines = [
-    '---',
-    'type: meeting-minutes',
-    'source: lingshu-document-workbench',
-    `created_at: ${now}`,
-    audioPath ? `audio_path: ${audioPath}` : '',
-    '---',
+    frontmatter,
     '',
     `# ${title}`,
     '',
@@ -2796,7 +2915,14 @@ function writeMinutesToVault({ title, content }) {
     suffix++
   }
   if (!isPathInside(vault.config.vaultPath, filePath)) throw new Error('非法会议纪要写入路径')
-  atomicWriteTextFile(filePath, content)
+  const contentWithMeta = ensureLingshuFrontMatter(content, {
+    id: `meeting_${Date.now()}`,
+    type: 'meeting-minutes',
+    status: 'draft',
+    source: 'lingshu-document-workbench',
+    tags: ['meeting', 'minutes']
+  })
+  atomicWriteTextFile(filePath, contentWithMeta)
   return {
     absolutePath: filePath,
     relativePath: path.relative(vault.config.vaultPath, filePath).split(path.sep).join('/')
