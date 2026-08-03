@@ -32,6 +32,7 @@ const USER_SKILLS_DIR = path.join(os.homedir(), 'Lingshu', 'skills')
 const DOCUMENT_VERSION_DIR = path.join(DATA_DIR, 'document-versions')
 const MEETINGS_DIR = path.join(DATA_DIR, 'meetings')
 const EXPORTS_DIR = path.join(DATA_DIR, 'exports')
+const MARKDOWN_INDEX_DB = path.join(DATA_DIR, 'index.sqlite')
 const DOCUMENT_WORKBENCH_FILE = path.join(DATA_DIR, 'document-workbench.json')
 const TOOL_RUNTIME_AUDIT_FILE = path.join(DATA_DIR, 'tool-runtime-audit.jsonl')
 const AGENT_DESKTOP_INVOCATIONS_FILE = path.join(DATA_DIR, 'agent-desktop-invocations.jsonl')
@@ -197,6 +198,7 @@ function getSystemSelfCheck() {
   const transcription = getTranscriptionConfig()
   const documentsRouteBuilt = directoryContainsText(dist, 'DocumentWorkbench') || directoryContainsText(dist, '/api/documents')
   const knowledgeInboxBuilt = directoryContainsText(dist, 'KnowledgeInbox') || directoryContainsText(dist, '/api/knowledge-inbox')
+  const searchIndexStatus = getMarkdownSearchIndexStatus({ fast: true })
   const checks = [
     { key: 'app-version', label: '应用版本', ok: PACKAGE_INFO.version === '1.1.0', value: `v${PACKAGE_INFO.version}` },
     { key: 'data-root', label: '数据目录', ...checkPath('data-root', lingshuRoot, 'dir') },
@@ -205,6 +207,7 @@ function getSystemSelfCheck() {
     { key: 'dist', label: '前端构建', ok: !!dist, path: dist || '未找到 dist/index.html' },
     { key: 'documents', label: '文档工作台', ok: !!documentsRouteBuilt, value: documentsRouteBuilt ? '已包含在前端构建中' : '未在当前构建中检测到' },
     { key: 'knowledge-inbox', label: '知识流 Inbox', ok: !!knowledgeInboxBuilt, value: knowledgeInboxBuilt ? '已包含在前端构建中' : '未在当前构建中检测到' },
+    { key: 'search-index', label: 'SQLite FTS5 索引', ok: !!searchIndexStatus.available, value: searchIndexStatus.available ? ('已索引 ' + searchIndexStatus.indexedCount + ' 篇') : (searchIndexStatus.reason || '不可用') },
     { key: 'claude-cli', label: 'Claude CLI', ok: claude.available, path: claude.path || '未检测到 claude CLI' },
     {
       key: 'transcription',
@@ -1016,6 +1019,258 @@ function readObsidianNote(filePath, config) {
   const headings = [...raw.matchAll(/^#{1,4}\s+(.+)$/gm)].map(match => match[1].trim()).slice(0, 12)
   const plain = stripMarkdownForSearch(raw)
   return { filePath, relativePath, title, tags, frontMatter, headings, raw, plain, mtime: stat.mtime.toISOString() }
+}
+
+
+// ==================== Markdown Vault SQLite FTS5 索引 ====================
+
+let markdownIndexAvailability = null
+
+function sqlQuote(value) {
+  return "'" + String(value ?? '').replace(/\u0000/g, '').replace(/'/g, "''") + "'"
+}
+
+function isSqliteFts5Available() {
+  if (markdownIndexAvailability) return markdownIndexAvailability
+  try {
+    execFileSync('sqlite3', [':memory:', 'CREATE VIRTUAL TABLE t USING fts5(x); INSERT INTO t VALUES ("hello world"); SELECT rowid FROM t WHERE t MATCH "hello";'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    markdownIndexAvailability = { available: true, reason: '' }
+  } catch (error) {
+    markdownIndexAvailability = { available: false, reason: error.message || 'sqlite3/FTS5 不可用' }
+  }
+  return markdownIndexAvailability
+}
+
+function sqliteRunIndex(sql, { timeout = 60000, maxBuffer = 8 * 1024 * 1024 } = {}) {
+  fs.mkdirSync(path.dirname(MARKDOWN_INDEX_DB), { recursive: true })
+  return execFileSync('sqlite3', [MARKDOWN_INDEX_DB], {
+    input: sql,
+    encoding: 'utf8',
+    timeout,
+    maxBuffer
+  })
+}
+
+function sqliteJsonIndex(sql, { timeout = 30000, maxBuffer = 16 * 1024 * 1024 } = {}) {
+  const output = execFileSync('sqlite3', ['-json', MARKDOWN_INDEX_DB, sql], {
+    encoding: 'utf8',
+    timeout,
+    maxBuffer
+  })
+  try { return JSON.parse(output || '[]') } catch (_) { return [] }
+}
+
+function ensureMarkdownSearchIndexSchema() {
+  const availability = isSqliteFts5Available()
+  if (!availability.available) return availability
+  sqliteRunIndex([
+    'PRAGMA journal_mode=WAL;',
+    'CREATE TABLE IF NOT EXISTS vault_files (',
+    '  relative_path TEXT PRIMARY KEY,',
+    '  absolute_path TEXT NOT NULL,',
+    '  title TEXT,',
+    '  tags TEXT,',
+    '  headings TEXT,',
+    '  mtime TEXT,',
+    '  size INTEGER,',
+    '  hash TEXT,',
+    '  plain TEXT,',
+    '  updated_at TEXT',
+    ');',
+    'CREATE VIRTUAL TABLE IF NOT EXISTS vault_fts USING fts5(',
+    '  relative_path UNINDEXED,',
+    '  title,',
+    '  tags,',
+    '  headings,',
+    '  body',
+    ');',
+    'CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT);'
+  ].join('\n'))
+  return { available: true, reason: '' }
+}
+
+function loadMarkdownIndexRows() {
+  const schema = ensureMarkdownSearchIndexSchema()
+  if (!schema.available) return new Map()
+  const rows = sqliteJsonIndex('SELECT relative_path, mtime, size FROM vault_files')
+  return new Map(rows.map(row => [row.relative_path, row]))
+}
+
+function upsertMarkdownIndexNote(note) {
+  const indexedBody = [
+    note.plain,
+    tokenizeSearchText([note.title, note.relativePath, note.tags.join(' '), note.headings.join(' '), note.plain].join('\n')).join(' ')
+  ].join('\n')
+  sqliteRunIndex([
+    'BEGIN;',
+    'DELETE FROM vault_files WHERE relative_path = ' + sqlQuote(note.relativePath) + ';',
+    'DELETE FROM vault_fts WHERE relative_path = ' + sqlQuote(note.relativePath) + ';',
+    'INSERT INTO vault_files(relative_path, absolute_path, title, tags, headings, mtime, size, hash, plain, updated_at) VALUES (',
+    [
+      sqlQuote(note.relativePath),
+      sqlQuote(note.filePath),
+      sqlQuote(note.title),
+      sqlQuote(JSON.stringify(note.tags || [])),
+      sqlQuote(JSON.stringify(note.headings || [])),
+      sqlQuote(note.mtime),
+      Number(fs.statSync(note.filePath).size) || 0,
+      sqlQuote(hashContent(note.raw || '')),
+      sqlQuote(note.plain || ''),
+      sqlQuote(new Date().toISOString())
+    ].join(', '),
+    ');',
+    'INSERT INTO vault_fts(relative_path, title, tags, headings, body) VALUES (',
+    [
+      sqlQuote(note.relativePath),
+      sqlQuote(note.title),
+      sqlQuote((note.tags || []).join(' ')),
+      sqlQuote((note.headings || []).join(' ')),
+      sqlQuote(indexedBody)
+    ].join(', '),
+    ');',
+    'COMMIT;'
+  ].join('\n'), { timeout: 60000, maxBuffer: 32 * 1024 * 1024 })
+}
+
+function deleteMarkdownIndexPath(relativePath) {
+  const schema = ensureMarkdownSearchIndexSchema()
+  if (!schema.available) return false
+  const normalized = normalizeVaultRelativePath(relativePath)
+  sqliteRunIndex([
+    'BEGIN;',
+    'DELETE FROM vault_files WHERE relative_path = ' + sqlQuote(normalized) + ';',
+    'DELETE FROM vault_fts WHERE relative_path = ' + sqlQuote(normalized) + ';',
+    'COMMIT;'
+  ].join('\n'))
+  return true
+}
+
+function syncMarkdownSearchIndex(config, { maxFiles = 10000, force = false } = {}) {
+  const schema = ensureMarkdownSearchIndexSchema()
+  if (!schema.available) return { available: false, reason: schema.reason, indexed: 0, skipped: 0, deleted: 0, total: 0 }
+  const existing = loadMarkdownIndexRows()
+  const files = listMarkdownVaultFiles(config, maxFiles)
+  const seen = new Set()
+  let indexed = 0
+  let skipped = 0
+
+  for (const filePath of files) {
+    try {
+      const relativePath = path.relative(config.vaultPath, filePath).split(path.sep).join('/')
+      seen.add(relativePath)
+      const stat = fs.statSync(filePath)
+      const mtime = stat.mtime.toISOString()
+      const prior = existing.get(relativePath)
+      if (!force && prior && prior.mtime === mtime && Number(prior.size) === stat.size) {
+        skipped += 1
+        continue
+      }
+      const note = readObsidianNote(filePath, config)
+      if (!note) {
+        deleteMarkdownIndexPath(relativePath)
+        continue
+      }
+      upsertMarkdownIndexNote(note)
+      indexed += 1
+    } catch (_) {}
+  }
+
+  let deleted = 0
+  for (const relativePath of existing.keys()) {
+    if (!seen.has(relativePath)) {
+      try {
+        deleteMarkdownIndexPath(relativePath)
+        deleted += 1
+      } catch (_) {}
+    }
+  }
+  sqliteRunIndex('INSERT OR REPLACE INTO index_meta(key, value) VALUES ("last_indexed_at", ' + sqlQuote(new Date().toISOString()) + ');')
+  return { available: true, dbPath: MARKDOWN_INDEX_DB, indexed, skipped, deleted, total: files.length }
+}
+
+function getMarkdownSearchIndexStatus({ fast = false } = {}) {
+  const schema = ensureMarkdownSearchIndexSchema()
+  if (!schema.available) return { available: false, reason: schema.reason, dbPath: MARKDOWN_INDEX_DB, indexedCount: 0, vaultCount: 0, staleCount: 0 }
+  const countRow = sqliteJsonIndex('SELECT COUNT(*) AS count FROM vault_files')[0] || {}
+  const metaRows = sqliteJsonIndex('SELECT key, value FROM index_meta')
+  const meta = Object.fromEntries(metaRows.map(row => [row.key, row.value]))
+  const status = {
+    available: true,
+    reason: '',
+    dbPath: MARKDOWN_INDEX_DB,
+    indexedCount: Number(countRow.count || 0),
+    vaultCount: 0,
+    staleCount: 0,
+    lastIndexedAt: meta.last_indexed_at || ''
+  }
+  if (fast) return status
+  const vault = getMarkdownVaultConfig()
+  if (!vault.ok) return { ...status, reason: vault.reason }
+  const existing = loadMarkdownIndexRows()
+  const files = listMarkdownVaultFiles(vault.config, 10000)
+  status.vaultCount = files.length
+  for (const filePath of files) {
+    try {
+      const relativePath = path.relative(vault.config.vaultPath, filePath).split(path.sep).join('/')
+      const stat = fs.statSync(filePath)
+      const prior = existing.get(relativePath)
+      if (!prior || prior.mtime !== stat.mtime.toISOString() || Number(prior.size) !== stat.size) status.staleCount += 1
+    } catch (_) {}
+  }
+  return status
+}
+
+function buildFtsMatchQuery(query, tokens) {
+  const terms = [...new Set([String(query || '').trim(), ...(tokens || [])])]
+    .map(term => String(term || '').trim())
+    .filter(term => term.length >= 2 && term.length <= 80)
+    .slice(0, 24)
+  if (terms.length === 0) return ''
+  return terms.map(term => '"' + term.replace(/"/g, '""') + '"').join(' OR ')
+}
+
+function searchMarkdownDocumentsWithIndex(query, maxResults = 20) {
+  const vault = getMarkdownVaultConfig()
+  if (!vault.ok) return { ok: false, reason: vault.reason, results: [] }
+  const tokens = tokenizeSearchText(query)
+  if (tokens.length === 0) return { ok: true, engine: 'sqlite-fts5', results: [] }
+  const sync = syncMarkdownSearchIndex(vault.config, { maxFiles: 10000 })
+  if (!sync.available) return { ok: false, reason: sync.reason, results: [] }
+  const match = buildFtsMatchQuery(query, tokens)
+  if (!match) return { ok: true, engine: 'sqlite-fts5', index: sync, results: [] }
+  const limit = Math.min(Math.max(Number(maxResults) || 20, 1), 50)
+  const rows = sqliteJsonIndex([
+    'SELECT f.relative_path, f.title, f.tags, f.headings, f.mtime, f.plain, bm25(vault_fts, 8.0, 4.0, 3.0, 1.0) AS rank',
+    'FROM vault_fts',
+    'JOIN vault_files f ON f.relative_path = vault_fts.relative_path',
+    'WHERE vault_fts MATCH ' + sqlQuote(match),
+    'ORDER BY rank',
+    'LIMIT ' + limit
+  ].join('\n'))
+  const results = rows.map(row => {
+    let tags = []
+    let headings = []
+    try { tags = JSON.parse(row.tags || '[]') } catch (_) {}
+    try { headings = JSON.parse(row.headings || '[]') } catch (_) {}
+    const noteLike = { plain: row.plain || '', title: row.title || '', relativePath: row.relative_path || '', tags, headings }
+    return {
+      title: row.title || path.basename(row.relative_path || '', '.md'),
+      relativePath: row.relative_path,
+      path: row.relative_path,
+      tags,
+      headings: headings.slice(0, 6),
+      mtime: row.mtime || '',
+      score: scoreObsidianNote(noteLike, query, tokens),
+      rank: Number(row.rank || 0),
+      snippet: buildObsidianSnippet(noteLike, tokens, 260)
+    }
+  })
+  results.sort((a, b) => b.score - a.score || a.rank - b.rank || String(b.mtime).localeCompare(String(a.mtime)))
+  return { ok: true, engine: 'sqlite-fts5', index: sync, results }
 }
 
 function scoreObsidianNote(note, query, tokens) {
@@ -1855,11 +2110,11 @@ function listMarkdownVaultFiles(config, maxFiles = 3000) {
   return results
 }
 
-function searchMarkdownDocuments(query, maxResults = 20) {
+function searchMarkdownDocumentsByScan(query, maxResults = 20) {
   const vault = getMarkdownVaultConfig()
   if (!vault.ok) return { ok: false, reason: vault.reason, results: [] }
   const tokens = tokenizeSearchText(query)
-  if (tokens.length === 0) return { ok: true, results: [] }
+  if (tokens.length === 0) return { ok: true, engine: 'scan', results: [] }
 
   const results = []
   for (const filePath of listMarkdownVaultFiles(vault.config)) {
@@ -1883,7 +2138,19 @@ function searchMarkdownDocuments(query, maxResults = 20) {
   }
 
   results.sort((a, b) => b.score - a.score || new Date(b.mtime) - new Date(a.mtime))
-  return { ok: true, results: results.slice(0, Math.min(Math.max(Number(maxResults) || 20, 1), 50)) }
+  return { ok: true, engine: 'scan', results: results.slice(0, Math.min(Math.max(Number(maxResults) || 20, 1), 50)) }
+}
+
+function searchMarkdownDocuments(query, maxResults = 20) {
+  try {
+    const indexed = searchMarkdownDocumentsWithIndex(query, maxResults)
+    if (indexed.ok) return indexed
+    const fallback = searchMarkdownDocumentsByScan(query, maxResults)
+    return { ...fallback, indexError: indexed.reason || '' }
+  } catch (error) {
+    const fallback = searchMarkdownDocumentsByScan(query, maxResults)
+    return { ...fallback, indexError: error.message || 'SQLite FTS5 索引不可用，已回退扫描搜索' }
+  }
 }
 
 function listDocumentProperties(config, { tags = [], status = '', query = '', maxResults = 200 } = {}) {
@@ -5404,6 +5671,26 @@ app.get('/api/documents/tree', (req, res) => {
     res.json({ tree: buildDocumentTree(vault.config) })
   } catch (error) {
     res.status(500).json({ error: '读取文档树失败', message: error.message })
+  }
+})
+
+
+app.get('/api/documents/index/status', (req, res) => {
+  try {
+    res.json(getMarkdownSearchIndexStatus({ fast: req.query.fast === '1' || req.query.fast === 'true' }))
+  } catch (error) {
+    res.status(500).json({ error: '读取知识库索引状态失败', message: error.message })
+  }
+})
+
+app.post('/api/documents/index/rebuild', (req, res) => {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return res.status(400).json({ error: vault.reason })
+    const result = syncMarkdownSearchIndex(vault.config, { force: !!req.body?.force, maxFiles: Number(req.body?.maxFiles) || 10000 })
+    res.json({ success: result.available, ...result, status: getMarkdownSearchIndexStatus({ fast: true }) })
+  } catch (error) {
+    res.status(500).json({ error: '重建知识库索引失败', message: error.message })
   }
 })
 
