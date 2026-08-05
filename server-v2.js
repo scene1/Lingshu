@@ -11,6 +11,28 @@ import MarkdownIt from 'markdown-it'
 
 const SERVER_FILE = fileURLToPath(import.meta.url)
 const SERVER_DIR = path.dirname(SERVER_FILE)
+const BACKEND_LOG_FILE = process.env.LINGSHU_BACKEND_LOG_FILE || ''
+
+function appendBackendLog(message) {
+  if (!BACKEND_LOG_FILE) return
+  try {
+    fs.mkdirSync(path.dirname(BACKEND_LOG_FILE), { recursive: true })
+    fs.appendFileSync(BACKEND_LOG_FILE, `[${new Date().toISOString()}] ${message}\n`)
+  } catch (_) {}
+}
+
+process.on('uncaughtException', (error) => {
+  appendBackendLog(`[uncaughtException] ${error.stack || error.message || String(error)}`)
+  console.error(error)
+  process.exitCode = 1
+})
+
+process.on('unhandledRejection', (reason) => {
+  appendBackendLog(`[unhandledRejection] ${reason?.stack || reason?.message || String(reason)}`)
+  console.error(reason)
+})
+
+appendBackendLog(`server bootstrap file=${SERVER_FILE}`)
 
 // 放宽 SSL 证书校验（自签证书 / 内部 API 网关需要）
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
@@ -21,7 +43,7 @@ const PORT = process.env.PORT || 3003
 app.use(cors())
 app.use(express.json())
 
-// 数据存储目录：1.1.0 起统一迁移到 ~/Lingshu，保留 openclaw-web-ui-data 子目录以承接旧数据。
+// 数据存储目录：V1.3 起统一沿用 ~/Lingshu，保留 openclaw-web-ui-data 子目录以承接旧数据。
 const MIGRATED_OPENCLAW_DATA_DIR = path.join(os.homedir(), 'Lingshu', 'workspace', 'openclaw-web-ui-data')
 const DEFAULT_LINGSHU_DATA_DIR = path.join(os.homedir(), 'Lingshu', 'workspace', 'lingshu-app-data')
 const DATA_DIR = process.env.LINGSHU_DATA_DIR || process.env.OPENCLAW_DATA_DIR || (fs.existsSync(MIGRATED_OPENCLAW_DATA_DIR) ? MIGRATED_OPENCLAW_DATA_DIR : DEFAULT_LINGSHU_DATA_DIR)
@@ -118,7 +140,7 @@ app.get('/api/system/self-check', (req, res) => {
 })
 
 function readPackageInfo() {
-  const fallback = { name: 'lingshu-app', version: '1.1.0', productName: '灵枢' }
+  const fallback = { name: 'lingshu-app', version: '1.3.0', productName: '灵枢' }
   try {
     const packagePath = path.join(SERVER_DIR, 'package.json')
     if (!fs.existsSync(packagePath)) return fallback
@@ -203,7 +225,7 @@ function getSystemSelfCheck() {
   const knowledgeInboxBuilt = directoryContainsText(dist, 'KnowledgeInbox') || directoryContainsText(dist, '/api/knowledge-inbox')
   const searchIndexStatus = getMarkdownSearchIndexStatus({ fast: true })
   const checks = [
-    { key: 'app-version', label: '应用版本', ok: PACKAGE_INFO.version === '1.1.0', value: `v${PACKAGE_INFO.version}` },
+    { key: 'app-version', label: '应用版本', ok: PACKAGE_INFO.version === '1.3.0', value: `v${PACKAGE_INFO.version}` },
     { key: 'data-root', label: '数据目录', ...checkPath('data-root', lingshuRoot, 'dir') },
     { key: 'runtime-data', label: '运行数据', ...checkPath('runtime-data', DATA_DIR, 'dir') },
     { key: 'config', label: '运行时配置', ...checkPath('config', configPath, 'file') },
@@ -729,6 +751,100 @@ function findSkillDirectory(skillName) {
   return null
 }
 
+function sanitizeSkillDirectoryName(value, fallback = 'skill') {
+  const raw = String(value || fallback).trim() || fallback
+  const safe = raw
+    .replace(/[\/\0<>:"|?*\x00-\x1F]/g, '-')
+    .replace(/^\.+$/, fallback)
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+  return safe || fallback
+}
+
+function listSkillMarkdownDirs(root, maxDepth = 4) {
+  const found = []
+  const rootResolved = path.resolve(root)
+  const walk = (dir, depth) => {
+    if (depth > maxDepth) return
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch (_) { return }
+    if (entries.some(entry => entry.isFile() && entry.name === 'SKILL.md')) {
+      found.push(dir)
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      if (entry.name === '__MACOSX' || entry.name === '.git' || entry.name === '.svn' || entry.name === '.hg') continue
+      const next = path.join(dir, entry.name)
+      if (!path.resolve(next).startsWith(rootResolved + path.sep)) continue
+      walk(next, depth + 1)
+    }
+  }
+  walk(root, 0)
+  return found
+}
+
+const SKILL_ARCHIVE_EXTRACTOR_PY = `
+import os, sys, zipfile, tarfile
+archive, dest = sys.argv[1], sys.argv[2]
+archive_name = sys.argv[3] if len(sys.argv) > 3 else archive
+dest = os.path.abspath(dest)
+os.makedirs(dest, exist_ok=True)
+
+def safe_target(name):
+    target = os.path.abspath(os.path.join(dest, name))
+    if target != dest and not target.startswith(dest + os.sep):
+        raise RuntimeError('压缩包包含非法路径: ' + name)
+    return target
+
+lower = archive_name.lower()
+if lower.endswith('.zip') or zipfile.is_zipfile(archive):
+    with zipfile.ZipFile(archive) as z:
+        for info in z.infolist():
+            safe_target(info.filename)
+        z.extractall(dest)
+elif lower.endswith('.tar.gz') or lower.endswith('.tgz') or tarfile.is_tarfile(archive):
+    with tarfile.open(archive, 'r:gz') as t:
+        for member in t.getmembers():
+            safe_target(member.name)
+            if member.issym() or member.islnk():
+                raise RuntimeError('压缩包包含链接文件: ' + member.name)
+        t.extractall(dest)
+else:
+    raise RuntimeError('仅支持 .zip / .tar.gz / .tgz')
+`
+
+function extractUploadedSkillArchive(file) {
+  const originalName = file.originalname || file.filename || ''
+  const lowerName = originalName.toLowerCase()
+  const isArchive = lowerName.endsWith('.zip') || lowerName.endsWith('.tar.gz') || lowerName.endsWith('.tgz')
+  if (!isArchive) throw new Error('仅支持 .zip / .tar.gz / .tgz Skill 包')
+
+  const extractRoot = fs.mkdtempSync(path.join(UPLOAD_DIR, 'skill-extract-'))
+  execFileSync('python3', ['-c', SKILL_ARCHIVE_EXTRACTOR_PY, file.path, extractRoot, originalName], { stdio: 'pipe' })
+  const skillDirs = listSkillMarkdownDirs(extractRoot)
+  if (skillDirs.length === 0) throw new Error('压缩包中未找到 SKILL.md')
+  if (skillDirs.length > 1) throw new Error('压缩包中包含多个 Skill，请拆分后分别安装')
+  return { extractRoot, skillPath: skillDirs[0] }
+}
+
+function installSkillFromDirectory(sourcePath, fallbackName = '') {
+  if (!fs.existsSync(path.join(sourcePath, 'SKILL.md'))) {
+    throw new Error('目录中未找到 SKILL.md')
+  }
+  const frontmatter = parseSkillFrontmatter(path.join(sourcePath, 'SKILL.md'))
+  const targetName = sanitizeSkillDirectoryName(frontmatter?.name || fallbackName || path.basename(sourcePath), sanitizeSkillDirectoryName(fallbackName || path.basename(sourcePath)))
+  const targetPath = path.join(USER_SKILLS_DIR, targetName)
+  if (fs.existsSync(targetPath)) {
+    const error = new Error('同名 Skill 已存在')
+    error.statusCode = 409
+    throw error
+  }
+  fs.mkdirSync(USER_SKILLS_DIR, { recursive: true })
+  fs.cpSync(sourcePath, targetPath, { recursive: true })
+  return { skill: targetName, targetPath }
+}
+
 function readSkillInfo(skillPath, fallbackName) {
   const skillMdPath = path.join(skillPath, 'SKILL.md')
   const skillContent = fs.readFileSync(skillMdPath, 'utf8')
@@ -1094,9 +1210,11 @@ function parseMarkdownFrontMatter(raw) {
   return frontMatter
 }
 
+const MARKDOWN_INDEX_MAX_FILE_SIZE = 512 * 1024
+
 function readObsidianNote(filePath, config) {
   const stat = fs.statSync(filePath)
-  if (stat.size > 512 * 1024) return null
+  if (stat.size > MARKDOWN_INDEX_MAX_FILE_SIZE) return null
   const raw = fs.readFileSync(filePath, 'utf8')
   const relativePath = path.relative(config.vaultPath, filePath).split(path.sep).join('/')
   const title = (raw.match(/^#\s+(.+)$/m)?.[1] || path.basename(filePath, '.md')).trim()
@@ -1275,6 +1393,11 @@ function syncMarkdownSearchIndex(config, { maxFiles = 10000, force = false } = {
       const stat = fs.statSync(filePath)
       const mtime = stat.mtime.toISOString()
       const prior = existing.get(relativePath)
+      if (stat.size > MARKDOWN_INDEX_MAX_FILE_SIZE) {
+        if (prior) deleteMarkdownIndexPath(relativePath)
+        skipped += 1
+        continue
+      }
       if (!force && prior && prior.mtime === mtime && Number(prior.size) === stat.size) {
         skipped += 1
         continue
@@ -1282,6 +1405,7 @@ function syncMarkdownSearchIndex(config, { maxFiles = 10000, force = false } = {
       const note = readObsidianNote(filePath, config)
       if (!note) {
         deleteMarkdownIndexPath(relativePath)
+        skipped += 1
         continue
       }
       upsertMarkdownIndexNote(note)
@@ -1315,6 +1439,8 @@ function getMarkdownSearchIndexStatus({ fast = false } = {}) {
     indexedCount: Number(countRow.count || 0),
     vaultCount: 0,
     staleCount: 0,
+    skippedCount: 0,
+    maxIndexFileSize: MARKDOWN_INDEX_MAX_FILE_SIZE,
     lastIndexedAt: meta.last_indexed_at || ''
   }
   if (fast) return status
@@ -1327,6 +1453,10 @@ function getMarkdownSearchIndexStatus({ fast = false } = {}) {
     try {
       const relativePath = path.relative(vault.config.vaultPath, filePath).split(path.sep).join('/')
       const stat = fs.statSync(filePath)
+      if (stat.size > MARKDOWN_INDEX_MAX_FILE_SIZE) {
+        status.skippedCount += 1
+        continue
+      }
       const prior = existing.get(relativePath)
       if (!prior || prior.mtime !== stat.mtime.toISOString() || Number(prior.size) !== stat.size) status.staleCount += 1
     } catch (_) {}
@@ -1855,6 +1985,12 @@ function archiveSessionToObsidian(sessionData, { updateIndex = true } = {}) {
     }
   }
   atomicWriteTextFile(archivePath, formatConversationMarkdown(nextSessionData, instance))
+  try {
+    rememberDocumentWorkbenchRecent({
+      path: relativePath,
+      title: path.basename(relativePath, '.md')
+    }, vault.config)
+  } catch (_) {}
   const index = updateIndex ? updateConversationArchiveIndex(vault.config) : null
   return { ok: true, relativePath, index, sessionData: nextSessionData }
 }
@@ -2115,11 +2251,24 @@ function parseRssItems(xml, maxItems = 12) {
       url: linkTag || atomLink,
       guid: extractXmlTag(block, 'guid') || extractXmlTag(block, 'id'),
       content: [
-        extractXmlTag(block, 'description') || extractXmlTag(block, 'summary') || extractXmlTag(block, 'content'),
+        extractXmlTag(block, 'description') || extractXmlTag(block, 'summary') || extractXmlTag(block, 'content:encoded') || extractXmlTag(block, 'content'),
         extractXmlTag(block, 'pubDate') || extractXmlTag(block, 'updated')
       ].filter(Boolean).join('\n\n')
     }
   }).filter(item => item.title || item.content || item.url)
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒）`)
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function addKnowledgeInboxItems(items) {
@@ -2138,7 +2287,7 @@ async function runKnowledgeAutomationSource(source) {
   if (!source.enabled) return { ok: false, captured: 0, message: '入口未启用', seenKeys: source.seenKeys || [] }
   if (source.type === 'rss') {
     if (!source.url) return { ok: false, captured: 0, message: 'RSS URL 为空', seenKeys: source.seenKeys || [] }
-    const response = await fetch(source.url, {
+    const response = await fetchWithTimeout(source.url, {
       headers: { 'User-Agent': 'Lingshu/1.1 Knowledge Automation' }
     })
     if (!response.ok) throw new Error(`RSS 请求失败：HTTP ${response.status}`)
@@ -2348,6 +2497,35 @@ function writeKnowledgeInboxItemToVault(item, folder = '00_Inbox/灵枢知识流
   }
 }
 
+function refreshKnowledgeIndexAfterInboxWrite(item, written) {
+  try {
+    const vault = getMarkdownVaultConfig()
+    if (!vault.ok) return { ok: false, reason: vault.reason }
+    const sync = syncMarkdownSearchIndex(vault.config, { force: false, maxFiles: 10000 })
+    const searchQuery = [item.title, ...(item.tags || []), ...(item.entities || [])]
+      .filter(Boolean)
+      .join(' ')
+      .trim()
+    const search = searchQuery ? searchMarkdownDocuments(searchQuery, 5) : { ok: false, results: [] }
+    const matched = Array.isArray(search.results)
+      ? search.results.some(result => result.relativePath === written.relativePath)
+      : false
+    return {
+      ok: !!sync.available,
+      sync,
+      status: getMarkdownSearchIndexStatus({ fast: true }),
+      search: {
+        query: searchQuery,
+        engine: search.engine || '',
+        matched,
+        results: Array.isArray(search.results) ? search.results.slice(0, 5) : []
+      }
+    }
+  } catch (error) {
+    return { ok: false, reason: error.message || '写入后刷新索引失败' }
+  }
+}
+
 function filterKnowledgeInboxItems(items, { status = '', sourceType = '', q = '' } = {}) {
   const query = String(q || '').trim().toLowerCase()
   return items.filter(item => {
@@ -2443,6 +2621,14 @@ function normalizeDocumentWorkbenchEntry(input, config) {
     mtime: stat?.mtime?.toISOString?.() || '',
     updatedAt: new Date().toISOString()
   }
+}
+
+function rememberDocumentWorkbenchRecent(input, config) {
+  const entry = normalizeDocumentWorkbenchEntry(input, config)
+  const state = loadDocumentWorkbenchState()
+  state.recent = [entry, ...state.recent.filter(item => item.path !== entry.path)].slice(0, 30)
+  saveDocumentWorkbenchState(state)
+  return state
 }
 
 function buildDocumentTree(config) {
@@ -4285,10 +4471,19 @@ app.get('/api/models', (req, res) => {
       for (const providerId of Object.keys(config.providers)) configuredProviders.add(providerId)
     }
 
+    // 若本地 claude CLI 可用，隐藏 anthropic 模型（走 HTTP API 会被 hoopa 等网关限流，CLI 是唯一可用路径）
+    const claudeCliAvailable = getClaudeCliStatus().available
+    let hiddenAnthropicCount = 0
+
     for (const providerId of configuredProviders) {
       const hasKey = hasApiKey(config, providerId)
       const known = KNOWN_PROVIDERS[providerId]
       if (known) {
+        // claude-cli 可用时，跳过 anthropic 模型（避免用户选错被网关限流）
+        if (providerId === 'anthropic' && claudeCliAvailable) {
+          hiddenAnthropicCount += known.models.length
+          continue
+        }
         for (const model of known.models) {
           addModel(`${providerId}/${model.id}`, `${known.name} - ${model.name}`, providerId, hasKey)
         }
@@ -4304,7 +4499,14 @@ app.get('/api/models', (req, res) => {
     }
 
     models.sort((a, b) => Number(b.hasApiKey) - Number(a.hasApiKey))
-    res.json({ models, providersWithKey: [...new Set(models.filter(m => m.hasApiKey).map(m => m.provider))] })
+    const responseData = {
+      models,
+      providersWithKey: [...new Set(models.filter(m => m.hasApiKey).map(m => m.provider))]
+    }
+    if (hiddenAnthropicCount > 0) {
+      responseData.hiddenAnthropic = { count: hiddenAnthropicCount, reason: '本地 claude CLI 可用，已自动隐藏 anthropic HTTP API 模型（避免网关限流）' }
+    }
+    res.json(responseData)
   } catch (error) {
     res.status(500).json({ error: '读取模型列表失败', message: error.message })
   }
@@ -4911,33 +5113,37 @@ app.post('/api/skills/:id/reload', (req, res) => {
 })
 
 app.post('/api/skills/install', upload.single('file'), (req, res) => {
+  let extracted = null
   try {
     const input = (req.body?.input || '').trim()
+    let sourcePath = ''
+    let fallbackName = ''
+
     if (req.file) {
-      return res.status(400).json({
-        success: false,
-        error: '暂不支持直接解压安装压缩包，请先解压到本地目录后填写目录路径'
-      })
+      extracted = extractUploadedSkillArchive(req.file)
+      sourcePath = extracted.skillPath
+      fallbackName = (req.file.originalname || '').replace(/\.(zip|tar\.gz|tgz)$/i, '')
+    } else {
+      if (!input) {
+        return res.status(400).json({ success: false, error: '请输入本地 Skill 目录路径，或上传 .zip / .tar.gz Skill 包' })
+      }
+      sourcePath = input.replace(/^~(?=$|\/)/, os.homedir())
+      fallbackName = path.basename(sourcePath)
     }
 
-    if (!input) {
-      return res.status(400).json({ success: false, error: '请输入本地 Skill 目录路径' })
-    }
-
-    const sourcePath = input.replace(/^~(?=$|\/)/, os.homedir())
-    if (!fs.existsSync(path.join(sourcePath, 'SKILL.md'))) {
-      return res.status(400).json({ success: false, error: '目录中未找到 SKILL.md' })
-    }
-
-    const targetPath = path.join(USER_SKILLS_DIR, path.basename(sourcePath))
-    if (fs.existsSync(targetPath)) {
-      return res.status(409).json({ success: false, error: '同名 Skill 已存在' })
-    }
-
-    fs.cpSync(sourcePath, targetPath, { recursive: true })
-    res.json({ success: true, skill: path.basename(sourcePath), message: 'Skill 已安装' })
+    const installed = installSkillFromDirectory(sourcePath, fallbackName)
+    res.json({ success: true, skill: installed.skill, message: 'Skill 已安装' })
   } catch (error) {
-    res.status(500).json({ success: false, error: '安装失败', message: error.message })
+    const status = error.statusCode || (/未找到|仅支持|多个 Skill|非法路径/.test(error.message || '') ? 400 : 500)
+    console.error('[skills/install] failed:', error)
+    res.status(status).json({ success: false, error: error.message || '安装失败', message: error.message })
+  } finally {
+    if (req.file?.path) {
+      try { fs.rmSync(req.file.path, { force: true }) } catch (_) {}
+    }
+    if (extracted?.extractRoot) {
+      try { fs.rmSync(extracted.extractRoot, { recursive: true, force: true }) } catch (_) {}
+    }
   }
 })
 
@@ -5887,6 +6093,7 @@ app.post('/api/knowledge-inbox/:id/write-to-vault', (req, res) => {
       ? processKnowledgeInboxItem(data.items[index])
       : data.items[index]
     const written = writeKnowledgeInboxItemToVault(source, req.body?.folder)
+    const indexResult = refreshKnowledgeIndexAfterInboxWrite(source, written)
     const item = {
       ...source,
       status: 'written',
@@ -5896,7 +6103,7 @@ app.post('/api/knowledge-inbox/:id/write-to-vault', (req, res) => {
     }
     data.items[index] = item
     saveKnowledgeInbox(data)
-    res.json({ success: true, item, vault: written })
+    res.json({ success: true, item, vault: written, index: indexResult })
   } catch (error) {
     res.status(400).json({ error: '写入知识库失败', message: error.message })
   }
@@ -5969,10 +6176,10 @@ app.delete('/api/knowledge-automation/:id', (req, res) => {
 })
 
 app.post('/api/knowledge-automation/:id/run', async (req, res) => {
+  const data = loadKnowledgeAutomation()
+  const index = data.sources.findIndex(item => item.id === req.params.id)
+  if (index < 0) return res.status(404).json({ error: '知识自动入口不存在' })
   try {
-    const data = loadKnowledgeAutomation()
-    const index = data.sources.findIndex(item => item.id === req.params.id)
-    if (index < 0) return res.status(404).json({ error: '知识自动入口不存在' })
     const result = await runKnowledgeAutomationSource(data.sources[index])
     data.sources[index] = {
       ...data.sources[index],
@@ -5986,14 +6193,23 @@ app.post('/api/knowledge-automation/:id/run', async (req, res) => {
     saveKnowledgeAutomation(data)
     res.json({ success: result.ok, result, source: data.sources[index] })
   } catch (error) {
-    res.status(400).json({ error: '运行知识自动入口失败', message: error.message })
+    data.sources[index] = {
+      ...data.sources[index],
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: 'error',
+      lastRunMessage: error.message,
+      updatedAt: new Date().toISOString()
+    }
+    saveKnowledgeAutomation(data)
+    res.status(400).json({ error: '运行知识自动入口失败', message: error.message, source: data.sources[index] })
   }
 })
 
 app.post('/api/webhooks/knowledge/:id', (req, res) => {
   try {
     const data = loadKnowledgeAutomation()
-    const source = data.sources.find(item => item.id === req.params.id && item.type === 'webhook')
+    const index = data.sources.findIndex(item => item.id === req.params.id && item.type === 'webhook')
+    const source = index >= 0 ? data.sources[index] : null
     if (!source) return res.status(404).json({ error: 'Webhook 入口不存在' })
     if (!source.enabled) return res.status(403).json({ error: 'Webhook 入口未启用' })
     const bearerToken = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
@@ -6001,14 +6217,46 @@ app.post('/api/webhooks/knowledge/:id', (req, res) => {
     if (source.token && providedToken !== source.token) return res.status(401).json({ error: 'Webhook token 无效' })
     const body = req.body || {}
     const payloadText = typeof body === 'string' ? body : JSON.stringify(body, null, 2)
+    const title = body.title || source.name || 'Webhook 捕获'
+    const content = body.content || body.text || payloadText
+    const sourceUrl = body.url || body.sourceUrl || ''
+    const key = knowledgeAutomationItemKey(source, {
+      guid: body.guid || body.id || body.eventId || body.event_id || '',
+      title,
+      content,
+      url: sourceUrl
+    })
+    const seen = new Set(Array.isArray(source.seenKeys) ? source.seenKeys : [])
+    const now = new Date().toISOString()
+    if (seen.has(key)) {
+      data.sources[index] = {
+        ...source,
+        lastRunAt: now,
+        lastRunStatus: 'skipped',
+        lastRunMessage: 'Webhook 重复内容已跳过',
+        updatedAt: now
+      }
+      saveKnowledgeAutomation(data)
+      return res.json({ success: true, captured: 0, duplicate: true, items: [], source: data.sources[index] })
+    }
     const items = addKnowledgeInboxItems([{
-      title: body.title || source.name || 'Webhook 捕获',
-      content: body.content || body.text || payloadText,
+      title,
+      content,
       sourceType: 'api',
-      sourceUrl: body.url || body.sourceUrl || '',
+      sourceUrl,
       tags: normalizeKnowledgeTags([...(source.tags || []), 'webhook'])
     }])
-    res.json({ success: true, captured: items.length, items })
+    data.sources[index] = {
+      ...source,
+      seenKeys: [key, ...(Array.isArray(source.seenKeys) ? source.seenKeys : [])].slice(0, 500),
+      lastRunAt: now,
+      lastRunStatus: 'success',
+      lastRunMessage: `Webhook 已捕获 ${items.length} 条内容`,
+      capturedCount: Number(source.capturedCount || 0) + items.length,
+      updatedAt: now
+    }
+    saveKnowledgeAutomation(data)
+    res.json({ success: true, captured: items.length, items, source: data.sources[index] })
   } catch (error) {
     res.status(400).json({ error: 'Webhook 捕获失败', message: error.message })
   }
@@ -6302,10 +6550,7 @@ app.post('/api/documents/recent', (req, res) => {
   try {
     const vault = getMarkdownVaultConfig()
     if (!vault.ok) return res.status(400).json({ error: vault.reason })
-    const entry = normalizeDocumentWorkbenchEntry(req.body || {}, vault.config)
-    const state = loadDocumentWorkbenchState()
-    state.recent = [entry, ...state.recent.filter(item => item.path !== entry.path)].slice(0, 30)
-    saveDocumentWorkbenchState(state)
+    const state = rememberDocumentWorkbenchRecent(req.body || {}, vault.config)
     res.json(state)
   } catch (error) {
     res.status(400).json({ error: '记录最近打开失败', message: error.message })
@@ -7168,6 +7413,7 @@ if (distPath) {
 startKnowledgeAutomationScheduler()
 
 const httpServer = app.listen(PORT, '127.0.0.1', () => {
+  appendBackendLog(`listening http://127.0.0.1:${PORT}`)
   console.log(`🚀 灵枢 App Server running on port ${PORT}`)
   console.log(`📱 API: http://127.0.0.1:${PORT}/api`)
   console.log(`💾 Data: ${DATA_DIR}`)
@@ -7176,6 +7422,7 @@ const httpServer = app.listen(PORT, '127.0.0.1', () => {
 })
 
 httpServer.on('error', (error) => {
+  appendBackendLog(`[listen-error] ${error.stack || error.message || String(error)}`)
   console.error(`灵枢后端监听失败：${error.message}`)
   console.error(`请检查端口 ${PORT} 是否被占用，或尝试设置 LINGSHU_BACKEND_PORT 后重启。`)
   process.exitCode = 1
