@@ -29,6 +29,7 @@
     "test:security": "node --test server/core/security.test.js",
     "test:eval-baseline": "node --test evals/conversation-runtime/*.test.js",
     "eval:conversation": "node evals/conversation-runtime/run-baseline.mjs",
+    "eval:conversation:save": "node evals/conversation-runtime/save-report.mjs",
     "verify": "npm run build && npm run bundle:server"
   },
   "dependencies": {

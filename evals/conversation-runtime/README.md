@@ -9,6 +9,8 @@
 3. 设置 `LINGSHU_EVAL_MODEL` 为已配置的 `provider/model`。
 4. 运行 `npm run eval:conversation`，报告写入 `latest-report.json`。
 
+本地完整报告不会上传全部长输出；趋势存储只保留每条输出的头尾摘要，避免超过 API 请求体限制。模型调用完成但趋势保存失败时，可运行 `npm run eval:conversation:save` 重试保存，不会再次调用模型。
+
 需要 LLM rubric 评分时，可另行运行 `npx promptfoo@latest eval -c evals/conversation-runtime/promptfooconfig.yaml`。默认脚本不会自动产生 60 次付费模型调用，只有显式运行评测命令才会调用模型。
 
 Promptfoo 只用于开发和 CI，不打包进 Electron 应用。

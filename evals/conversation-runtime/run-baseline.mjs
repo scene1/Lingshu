@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import { baselineCases, baselineMetadata } from './baseline-cases.js'
+import { compactEvaluationReport } from './report-payload.js'
 
 const endpoint = process.env.LINGSHU_EVAL_ENDPOINT
   || 'http://127.0.0.1:3005/api/instances/local/sessions/lingshu-eval/chat'
@@ -80,7 +81,7 @@ if (process.env.LINGSHU_EVAL_SAVE !== '0') {
     const response = await fetch(reportEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...report, baselineVersion: baselineMetadata.version }),
+      body: JSON.stringify(compactEvaluationReport({ ...report, baselineVersion: baselineMetadata.version })),
       signal: AbortSignal.timeout(10000),
     })
     if (!response.ok) console.warn(`保存评测趋势失败: HTTP ${response.status}`)
