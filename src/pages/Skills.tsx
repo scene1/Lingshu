@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Table, Button, Tag, Space, Modal, Input, message, Popconfirm, Upload, Typography } from 'antd'
+import { Card, Table, Button, Tag, Space, Modal, Input, InputNumber, Select, Checkbox, message, Popconfirm, Upload, Typography } from 'antd'
 import { UploadOutlined, InboxOutlined, SaveOutlined } from '@ant-design/icons'
 import {
   PlusOutlined,
@@ -7,7 +7,9 @@ import {
   ReloadOutlined,
   SearchOutlined,
   CheckCircleOutlined,
-  ExclamationCircleOutlined
+  ExclamationCircleOutlined,
+  FileTextOutlined,
+  PlayCircleOutlined
 } from '@ant-design/icons'
 
 const { Dragger } = Upload
@@ -21,6 +23,47 @@ interface Skill {
   status: 'active' | 'inactive' | 'error'
   category: string
   installedAt: string
+  runtimeMode?: 'prompt-only' | 'runtime' | 'manifest-error'
+  runtimeStatus?: string
+  runtimeManifest?: string
+  runtimeCommand?: string
+  runtimeParameters?: SkillRuntimeParameter[]
+  runtimePermissions?: SkillRuntimePermission[]
+  runtimeSecurityLevel?: 'none' | 'low' | 'medium' | 'high'
+}
+
+interface SkillRuntimeParameter {
+  name: string
+  label?: string
+  type?: 'string' | 'text' | 'number' | 'integer' | 'boolean' | 'select' | 'json' | 'object' | 'file'
+  required?: boolean
+  default?: any
+  placeholder?: string
+  options?: Array<{ label: string; value: any }>
+}
+
+interface SkillRuntimePermission {
+  key: string
+  label?: string
+  description?: string
+  level?: 'low' | 'medium' | 'high' | string
+  required?: boolean
+}
+
+interface SkillTestResult {
+  success: boolean
+  mode: 'prompt-only' | 'runtime' | 'manifest-error'
+  status?: string
+  skill: string
+  durationMs?: number
+  runRecord?: {
+    id?: string
+    status?: string
+  }
+  output?: string
+  error?: string
+  message?: string
+  description?: string
 }
 
 const Skills: React.FC = () => {
@@ -33,6 +76,11 @@ const Skills: React.FC = () => {
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [extraDirsText, setExtraDirsText] = useState('')
   const [savingDirs, setSavingDirs] = useState(false)
+  const [testingSkill, setTestingSkill] = useState<Skill | null>(null)
+  const [testInput, setTestInput] = useState('测试执行')
+  const [testArguments, setTestArguments] = useState<Record<string, any>>({})
+  const [testResult, setTestResult] = useState<SkillTestResult | null>(null)
+  const [testingSkillId, setTestingSkillId] = useState('')
 
   // 从 API 获取 skills
   const fetchSkills = async () => {
@@ -153,6 +201,77 @@ const Skills: React.FC = () => {
     }
   }
 
+  const openTestModal = (skill: Skill) => {
+    setTestingSkill(skill)
+    setTestInput('测试执行')
+    setTestArguments(Object.fromEntries((skill.runtimeParameters || []).map(param => [
+      param.name,
+      param.default !== undefined
+        ? (param.type === 'json' || param.type === 'object'
+            ? JSON.stringify(param.default, null, 2)
+            : param.default)
+        : (param.type === 'boolean' ? false : param.type === 'number' || param.type === 'integer' ? 0 : param.type === 'object' ? '{}' : '')
+    ])))
+    setTestResult(null)
+  }
+
+  const buildSkillArgumentsForSubmit = (skill: Skill) => {
+    const nextArguments: Record<string, any> = {}
+    for (const param of skill.runtimeParameters || []) {
+      const rawValue = testArguments[param.name]
+      const isMissing = rawValue === undefined || rawValue === null || (typeof rawValue === 'string' && rawValue.trim() === '')
+      if (isMissing) {
+        if (param.required) throw new Error(`${param.label || param.name} 为必填参数`)
+        continue
+      }
+      if (param.type === 'json' || param.type === 'object') {
+        try {
+          const parsed = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue
+          if (param.type === 'object' && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) {
+            throw new Error('必须是 JSON 对象')
+          }
+          nextArguments[param.name] = parsed
+        } catch (error: any) {
+          throw new Error(`${param.label || param.name} 不是合法 ${param.type === 'object' ? 'JSON 对象' : 'JSON'}：${error.message}`)
+        }
+      } else {
+        nextArguments[param.name] = rawValue
+      }
+    }
+    return nextArguments
+  }
+
+  const handleTestSkill = async () => {
+    if (!testingSkill) return
+    setTestingSkillId(testingSkill.id)
+    try {
+      const submitArguments = buildSkillArgumentsForSubmit(testingSkill)
+      const response = await fetch(`/api/instances/local/skills/${encodeURIComponent(testingSkill.id)}/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: testInput, arguments: submitArguments })
+      })
+      const result = await response.json()
+      setTestResult(result)
+      if (response.ok && result.success !== false) {
+        message.success('Skill 测试完成')
+      } else {
+        message.warning(result.error || result.message || 'Skill 测试返回异常')
+      }
+    } catch (error: any) {
+      setTestResult({
+        success: false,
+        mode: 'manifest-error',
+        status: 'error',
+        skill: testingSkill.id,
+        error: error.message || '测试失败'
+      })
+      message.error(error.message || 'Skill 测试失败')
+    } finally {
+      setTestingSkillId('')
+    }
+  }
+
   const getStatusTag = (status: string) => {
     switch (status) {
       case 'active':
@@ -166,6 +285,81 @@ const Skills: React.FC = () => {
     }
   }
 
+  const getRuntimeTag = (record: Skill) => {
+    if (record.runtimeMode === 'runtime') {
+      return <Tag color="processing" icon={<PlayCircleOutlined />}>可执行</Tag>
+    }
+    if (record.runtimeMode === 'manifest-error') {
+      return <Tag color="error" icon={<ExclamationCircleOutlined />}>清单错误</Tag>
+    }
+    return <Tag icon={<FileTextOutlined />}>说明型</Tag>
+  }
+
+  const getSecurityTag = (record: Skill) => {
+    if (record.runtimeSecurityLevel === 'high') return <Tag color="red">高权限</Tag>
+    if (record.runtimeSecurityLevel === 'medium') return <Tag color="orange">需留意</Tag>
+    if (record.runtimeSecurityLevel === 'low') return <Tag color="green">低风险</Tag>
+    return <Tag>未声明权限</Tag>
+  }
+
+  const updateTestArgument = (name: string, value: any) => {
+    setTestArguments(prev => ({ ...prev, [name]: value }))
+  }
+
+  const renderParameterInput = (param: SkillRuntimeParameter) => {
+    const value = testArguments[param.name]
+    const placeholder = param.placeholder || `请输入 ${param.label || param.name}`
+    if (param.type === 'text' || param.type === 'json' || param.type === 'object') {
+      return (
+        <Input.TextArea
+          value={value}
+          rows={param.type === 'text' ? 3 : 5}
+          placeholder={placeholder}
+          style={param.type === 'json' || param.type === 'object' ? { fontFamily: 'monospace', fontSize: 13 } : undefined}
+          onChange={event => updateTestArgument(param.name, event.target.value)}
+        />
+      )
+    }
+    if (param.type === 'number' || param.type === 'integer') {
+      return (
+        <InputNumber
+          value={value}
+          precision={param.type === 'integer' ? 0 : undefined}
+          style={{ width: '100%' }}
+          placeholder={placeholder}
+          onChange={next => updateTestArgument(param.name, next)}
+        />
+      )
+    }
+    if (param.type === 'boolean') {
+      return (
+        <Checkbox
+          checked={Boolean(value)}
+          onChange={event => updateTestArgument(param.name, event.target.checked)}
+        >
+          {param.placeholder || '启用'}
+        </Checkbox>
+      )
+    }
+    if (param.type === 'select') {
+      return (
+        <Select
+          value={value}
+          options={param.options || []}
+          placeholder={placeholder}
+          onChange={next => updateTestArgument(param.name, next)}
+        />
+      )
+    }
+    return (
+      <Input
+        value={value}
+        placeholder={placeholder}
+        onChange={event => updateTestArgument(param.name, event.target.value)}
+      />
+    )
+  }
+
   const columns = [
     {
       title: '名称',
@@ -175,8 +369,28 @@ const Skills: React.FC = () => {
         <div>
           <strong>{text}</strong>
           <div style={{ color: '#999', fontSize: 12 }}>{record.description}</div>
+          {(record.runtimeManifest || record.runtimeCommand || record.runtimeStatus) && (
+            <div style={{ color: '#999', fontSize: 12, marginTop: 4 }}>
+              {record.runtimeManifest && <span>清单：{record.runtimeManifest}</span>}
+              {record.runtimeCommand && <span style={{ marginLeft: record.runtimeManifest ? 8 : 0 }}>入口：{record.runtimeCommand}</span>}
+              {record.runtimeStatus && record.runtimeMode !== 'runtime' && <span style={{ marginLeft: record.runtimeManifest || record.runtimeCommand ? 8 : 0 }}>{record.runtimeStatus}</span>}
+            </div>
+          )}
+          <div style={{ marginTop: 6 }}>
+            {getSecurityTag(record)}
+            {(record.runtimePermissions || []).slice(0, 3).map(permission => (
+              <Tag key={permission.key}>{permission.label || permission.key}</Tag>
+            ))}
+            {(record.runtimePermissions || []).length > 3 && <Tag>+{(record.runtimePermissions || []).length - 3}</Tag>}
+          </div>
         </div>
       )
+    },
+    {
+      title: '执行模式',
+      key: 'runtimeMode',
+      width: 130,
+      render: (_: any, record: Skill) => getRuntimeTag(record)
     },
     {
       title: '版本',
@@ -207,9 +421,17 @@ const Skills: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 200,
+      width: 280,
       render: (_: any, record: Skill) => (
         <Space>
+          <Button
+            size="small"
+            icon={<PlayCircleOutlined />}
+            loading={testingSkillId === record.id}
+            onClick={() => openTestModal(record)}
+          >
+            测试
+          </Button>
           <Button
             size="small"
             icon={<ReloadOutlined />}
@@ -255,7 +477,7 @@ const Skills: React.FC = () => {
         <Input.TextArea
           value={extraDirsText}
           onChange={e => setExtraDirsText(e.target.value)}
-          placeholder={"每行一个目录路径，例如：\n/Users/xxx/.stepfun/skills\n/Applications/某应用.app/Contents/Resources/skills"}
+          placeholder={"每行一个目录路径，例如：\n~/.stepfun/skills\n~/my-skills"}
           rows={4}
           style={{ fontFamily: 'monospace', fontSize: 13 }}
         />
@@ -345,6 +567,100 @@ const Skills: React.FC = () => {
             <li>本地路径（/path/to/skill）</li>
           </ul>
         </div>
+      </Modal>
+
+      <Modal
+        title={testingSkill ? `测试 Skill：${testingSkill.name}` : '测试 Skill'}
+        open={!!testingSkill}
+        onOk={handleTestSkill}
+        confirmLoading={!!testingSkill && testingSkillId === testingSkill.id}
+        onCancel={() => {
+          setTestingSkill(null)
+          setTestResult(null)
+          setTestingSkillId('')
+        }}
+        okText="运行测试"
+        cancelText="关闭"
+        width={720}
+      >
+        {testingSkill && (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Space wrap>
+              {getRuntimeTag(testingSkill)}
+              {getSecurityTag(testingSkill)}
+              <Tag>{testingSkill.id}</Tag>
+              {testingSkill.runtimeManifest && <Tag color="blue">{testingSkill.runtimeManifest}</Tag>}
+              {testingSkill.runtimeCommand && <Tag color="purple">{testingSkill.runtimeCommand}</Tag>}
+            </Space>
+            {(testingSkill.runtimePermissions || []).length > 0 && (
+              <Card size="small" title="权限声明">
+                <Space wrap>
+                  {(testingSkill.runtimePermissions || []).map(permission => (
+                    <Tag key={permission.key} color={permission.level === 'high' ? 'red' : permission.level === 'medium' ? 'orange' : 'green'}>
+                      {permission.label || permission.key}
+                    </Tag>
+                  ))}
+                </Space>
+              </Card>
+            )}
+            <div>
+              <Text strong>测试输入</Text>
+              <Input.TextArea
+                value={testInput}
+                onChange={event => setTestInput(event.target.value)}
+                rows={4}
+                style={{ marginTop: 8 }}
+                placeholder="这段文本会作为 params/message 传给 Skill Runtime"
+              />
+            </div>
+            {(testingSkill.runtimeParameters || []).length > 0 && (
+              <Card size="small" title="参数">
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {(testingSkill.runtimeParameters || []).map(param => (
+                    <div key={param.name}>
+                      <Space size={4} style={{ marginBottom: 6 }}>
+                        <Text strong>{param.label || param.name}</Text>
+                        {param.required && <Tag color="red">必填</Tag>}
+                        <Text type="secondary" style={{ fontSize: 12 }}>{param.name}</Text>
+                      </Space>
+                      {renderParameterInput(param)}
+                    </div>
+                  ))}
+                </Space>
+              </Card>
+            )}
+            {testResult && (
+              <Card
+                size="small"
+                title="测试结果"
+                extra={
+                  <Space size={6}>
+                    <Tag color={testResult.success ? 'success' : 'error'}>
+                      {testResult.success ? '成功' : '失败'}
+                    </Tag>
+                    <Tag>{testResult.mode}</Tag>
+                    {testResult.status && <Tag>{testResult.status}</Tag>}
+                    {typeof testResult.durationMs === 'number' && <Tag>{testResult.durationMs}ms</Tag>}
+                    {testResult.runRecord?.id && <Tag color="cyan">Run {testResult.runRecord.id}</Tag>}
+                  </Space>
+                }
+              >
+                <pre style={{
+                  maxHeight: 320,
+                  overflow: 'auto',
+                  margin: 0,
+                  padding: 12,
+                  borderRadius: 6,
+                  background: '#0f172a',
+                  color: '#e5e7eb',
+                  whiteSpace: 'pre-wrap'
+                }}>
+                  {testResult.output || testResult.error || testResult.message || '无输出'}
+                </pre>
+              </Card>
+            )}
+          </Space>
+        )}
       </Modal>
     </div>
   )

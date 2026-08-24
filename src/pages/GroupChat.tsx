@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import {
   Input, Button, Space, Tag, Avatar, List,
   Tabs, Tooltip, message, Spin, Empty, Select,
-  Card, Typography, Dropdown
+  Card, Typography, Dropdown, Modal, Form, Alert
 } from 'antd'
 import {
   SendOutlined, PlusOutlined, DeleteOutlined,
@@ -14,6 +14,10 @@ import {
   FileTextOutlined, ThunderboltOutlined,
   CloudOutlined, DesktopOutlined, InboxOutlined
 } from '@ant-design/icons'
+import { TeamRoleSelector } from '../components/chat/TeamRoleSelector'
+import { TaskDistributor } from '../components/chat/TaskDistributor'
+import { AgentReplyTimeline } from '../components/chat/AgentReplyTimeline'
+import type { AgentRunStep, TeamRoleConfig, TaskDistributionMode } from '../types'
 
 const { Text } = Typography
 const { TextArea } = Input
@@ -23,6 +27,8 @@ interface Participant {
   model: string
   provider: string
   avatarColor: string
+  role?: TeamRoleConfig['role'] | 'leader' | 'member'
+  systemPrompt?: string
 }
 
 interface GroupMessage {
@@ -32,12 +38,15 @@ interface GroupMessage {
   content: string
   model?: string
   provider?: string
+  role_tag?: string
+  runId?: string
   timestamp: string
 }
 
 interface GroupSession {
   id: string
   name: string
+  mode?: 'sequential' | 'free' | 'all' | 'team'
   participantCount: number
   messageCount: number
   createdAt: string
@@ -74,19 +83,26 @@ const GroupChat: React.FC = () => {
   const [messages, setMessages] = useState<GroupMessage[]>([])
   const [inputValue, setInputValue] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [mode, setMode] = useState<'sequential' | 'free' | 'all'>('all')
+  const [mode, setMode] = useState<'sequential' | 'free' | 'all' | 'team'>('all')
+  const [distributionMode, setDistributionMode] = useState<TaskDistributionMode>('sequential')
+  const [teamRoles, setTeamRoles] = useState<TeamRoleConfig[]>([])
+  const [latestRunSteps, setLatestRunSteps] = useState<AgentRunStep[]>([])
   const [showMention, setShowMention] = useState(false)
   const [mentionFilter, setMentionFilter] = useState('')
   const [mentionAgent, setMentionAgent] = useState<string | null>(null)
   const [availableModels, setAvailableModels] = useState<any[]>([])
   const [availableAgents, setAvailableAgents] = useState<any[]>([])
   const [editingName, setEditingName] = useState(false)
+  const [createModalVisible, setCreateModalVisible] = useState(false)
+  const [createParticipants, setCreateParticipants] = useState<Participant[]>([])
+  const [creatingSession, setCreatingSession] = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([])
   const [filePickMode, setFilePickMode] = useState<'attachment' | 'image' | 'document'>('attachment')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<any>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [createForm] = Form.useForm()
 
   useEffect(() => {
     loadSessions()
@@ -115,8 +131,25 @@ const GroupChat: React.FC = () => {
       if (res.ok) {
         const data = await res.json()
         setMessages(data.messages || [])
+        const latestRun = Array.isArray(data.runs) && data.runs.length > 0
+          ? data.runs[data.runs.length - 1]
+          : null
+        setLatestRunSteps(Array.isArray(latestRun?.steps) ? latestRun.steps : [])
         setParticipants(data.participants || [{ agentId: 'Agent-1', model: '', provider: '', avatarColor: AGENT_COLORS[0] }])
+        const restoredTeamRoles = (data.participants || [])
+          .filter((p: Participant) => ['coordinator', 'executor', 'reviewer', 'researcher'].includes(String(p.role || '')))
+          .map((p: Participant) => ({
+            agentId: p.agentId,
+            model: p.model,
+            role: p.role,
+            systemPrompt: p.systemPrompt || '',
+            avatarColor: p.avatarColor,
+          }))
+        if (restoredTeamRoles.length > 0) {
+          setTeamRoles(restoredTeamRoles)
+        }
         setSessionName(data.name || '群聊')
+        setMode(data.mode || 'all')
       }
     } catch (e) { console.warn('GroupChat error:', e) }
   }
@@ -147,25 +180,114 @@ const GroupChat: React.FC = () => {
     return found ? found.label : modelKey
   }
 
-  const handleNewSession = async () => {
+  const getDefaultModelKey = () => {
+    const withKey = availableModels.find(m => m.hasApiKey)
+    return withKey?.key || availableModels[0]?.key || ''
+  }
+
+  const getAgentLabel = (agentId: string) => {
+    const found = availableAgents.find((agent: any) => (agent.id || agent.name) === agentId)
+    return found?.name || found?.id || agentId
+  }
+
+  const buildParticipantForAgent = (agentId: string, index: number, source: Participant[] = createParticipants): Participant => {
+    const previous = source.find(item => item.agentId === agentId) || participants.find(item => item.agentId === agentId)
+    const model = previous?.model || getDefaultModelKey()
+    return {
+      agentId,
+      model,
+      provider: previous?.provider || model.split('/')[0] || '',
+      avatarColor: previous?.avatarColor || AGENT_COLORS[index % AGENT_COLORS.length]
+    }
+  }
+
+  const getTeamParticipants = (roles = teamRoles): Participant[] => roles
+    .filter(role => role.agentId && role.model)
+    .map((role, index) => ({
+      agentId: role.agentId,
+      model: role.model,
+      provider: role.model.split('/')[0] || '',
+      avatarColor: role.avatarColor || AGENT_COLORS[index % AGENT_COLORS.length],
+      role: role.role,
+      systemPrompt: role.systemPrompt,
+    }))
+
+  const getParticipantsWithModel = (list = participants) => list.filter(p => p.agentId && p.model)
+
+  const getParticipantWarning = (list = participants) => {
+    if (list.length === 0) return '请至少添加一个 Agent 成员'
+    if (getParticipantsWithModel(list).length === 0) return '请至少为一个 Agent 成员选择模型'
+    return ''
+  }
+
+  const openCreateSessionModal = () => {
+    const initialParticipants = participants.length > 0
+      ? participants.map((item, index) => buildParticipantForAgent(item.agentId, index, participants))
+      : availableAgents.slice(0, 2).map((agent: any, index) => buildParticipantForAgent(agent.id || agent.name, index, []))
+    setCreateParticipants(initialParticipants)
+    createForm.setFieldsValue({
+      name: sessionName && sessionName !== '群聊' ? sessionName : '新群聊',
+      mode,
+      agentIds: initialParticipants.map(item => item.agentId)
+    })
+    setCreateModalVisible(true)
+  }
+
+  const handleCreateAgentSelectionChange = (agentIds: string[]) => {
+    const next = agentIds.map((agentId, index) => buildParticipantForAgent(agentId, index, createParticipants))
+    setCreateParticipants(next)
+  }
+
+  const handleCreateParticipantModelChange = (index: number, modelKey: string) => {
+    const next = [...createParticipants]
+    next[index] = {
+      ...next[index],
+      model: modelKey,
+      provider: modelKey.split('/')[0] || ''
+    }
+    setCreateParticipants(next)
+  }
+
+  const handleNewSession = async (values?: { name?: string; mode?: 'sequential' | 'free' | 'all' }) => {
+    const selectedParticipants = createParticipants
+    const warning = getParticipantWarning(selectedParticipants)
+    if (warning) {
+      message.warning(warning)
+      return
+    }
+
+    const nextName = values?.name || sessionName || '新群聊'
+    const nextMode = values?.mode || mode
+    setCreatingSession(true)
     try {
       const res = await fetch('/api/group-chat/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: sessionName || '新群聊', participants })
+        body: JSON.stringify({ name: nextName, mode: nextMode, participants: selectedParticipants })
       })
-      if (res.ok) {
-        const newSession = await res.json()
-        setSessions(prev => [newSession, ...prev])
-        setCurrentSessionId(newSession.id)
-        setMessages([])
-        setSessionName('新群聊')
-        setAttachments([])
-        // 清除草稿，并将当前 participants 保存到新创建的会话
-        sessionStorage.removeItem(DRAFT_KEY)
-        saveParticipantsToSession(newSession.id, participants)
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}))
+        message.error(errorData.error || errorData.message || `创建失败：HTTP ${res.status}`)
+        return
       }
-    } catch (_) { message.error('创建群聊失败') }
+      const newSession = await res.json()
+      setSessions(prev => [newSession, ...prev])
+      setCurrentSessionId(newSession.id)
+      setMessages([])
+      setSessionName(newSession.name || nextName)
+      setMode(newSession.mode || nextMode)
+      setParticipants(selectedParticipants)
+      setAttachments([])
+      setCreateModalVisible(false)
+      // 清除草稿，并将当前 participants 保存到新创建的会话
+      sessionStorage.removeItem(DRAFT_KEY)
+      saveParticipantsToSession(newSession.id, selectedParticipants)
+      message.success('协作房间已创建')
+    } catch (error: any) {
+      message.error(`创建群聊失败：${error.message || '请确认后端服务已重启'}`)
+    } finally {
+      setCreatingSession(false)
+    }
   }
 
   const handleDeleteSession = async (sessionId: string) => {
@@ -175,6 +297,7 @@ const GroupChat: React.FC = () => {
       if (currentSessionId === sessionId) {
         setCurrentSessionId('')
         setMessages([])
+        setLatestRunSteps([])
       }
     } catch (_) { message.error('删除失败') }
   }
@@ -273,34 +396,38 @@ const GroupChat: React.FC = () => {
 
   const handleSend = async () => {
     if (!inputValue.trim() || isLoading) return
-    if (participants.length === 0) {
+    const effectiveParticipants = mode === 'team' ? getTeamParticipants() : participants
+    if (effectiveParticipants.length === 0) {
       message.warning('请至少添加一个参与者')
       return
     }
 
-    const hasModel = participants.some(p => p.model)
+    const hasModel = effectiveParticipants.some(p => p.model)
     if (!hasModel) {
       message.warning('请为至少一个参与者选择模型')
       return
+    }
+    if (mode === 'team') {
+      setParticipants(effectiveParticipants)
     }
 
     // 自动创建会话
     let sid = currentSessionId
     if (!sid) {
       try {
-        const res = await fetch('/api/group-chat/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: sessionName, participants })
-        })
+	        const res = await fetch('/api/group-chat/sessions', {
+	          method: 'POST',
+	          headers: { 'Content-Type': 'application/json' },
+	          body: JSON.stringify({ name: sessionName, participants: effectiveParticipants, mode })
+	        })
         if (res.ok) {
           const data = await res.json()
           sid = data.id
           setSessions(prev => [data, ...prev])
-          setCurrentSessionId(sid)
-          sessionStorage.removeItem(DRAFT_KEY)
-          saveParticipantsToSession(sid, participants)
-        }
+	          setCurrentSessionId(sid)
+	          sessionStorage.removeItem(DRAFT_KEY)
+	          saveParticipantsToSession(sid, effectiveParticipants)
+	        }
       } catch (_) {
         message.error('创建会话失败')
         return
@@ -311,6 +438,7 @@ const GroupChat: React.FC = () => {
     setInputValue('')
     setMentionAgent(null)
     setAttachments([])
+    setLatestRunSteps([])
     setIsLoading(true)
 
     const userMsg: GroupMessage = {
@@ -322,12 +450,20 @@ const GroupChat: React.FC = () => {
     try {
       const res = await fetch('/api/group-chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          participants: participants.map(p => ({ agentId: p.agentId, model: p.model, provider: p.provider })),
+	        headers: { 'Content-Type': 'application/json' },
+	        body: JSON.stringify({
+	          participants: effectiveParticipants.map(p => ({
+	            agentId: p.agentId,
+	            model: p.model,
+	            provider: p.provider,
+	            role: p.role,
+	            systemPrompt: p.systemPrompt,
+	            avatarColor: p.avatarColor,
+	          })),
           message: msg,
           mentionAgent: mentionAgent || undefined,
           mode: mode === 'free' && mentionAgent ? 'free' : mode,
+          distributionMode: mode === 'team' ? distributionMode : 'sequential',
           sessionId: sid
         })
       })
@@ -337,6 +473,7 @@ const GroupChat: React.FC = () => {
         // 过滤掉已经存在的 user 消息
         const newMsgs = data.messages.filter((m: GroupMessage) => m.role === 'assistant')
         setMessages(prev => [...prev, ...newMsgs])
+        setLatestRunSteps(Array.isArray(data.run?.steps) ? data.run.steps : [])
         loadSessions()
       } else {
         const err = await res.json()
@@ -391,8 +528,12 @@ const GroupChat: React.FC = () => {
         label: a.name || a.id
       }))
 
+  const createAgentOptions = availableAgents.length > 0
+    ? availableAgents.map((agent: any) => ({ value: agent.id || agent.name, label: agent.name || agent.id }))
+    : participants.map(p => ({ value: p.agentId, label: p.agentId }))
+
   return (
-    <div style={{ display: 'flex', height: 'calc(100vh - 64px)', background: '#f5f7fa' }}>
+    <div className="group-chat-workspace" style={{ display: 'flex', height: 'calc(100vh - 64px)', background: '#f5f7fa' }}>
       {/* 左侧面板 */}
       <div style={{ width: 300, minWidth: 300, background: '#fff', borderRight: '1px solid #e8e8e8', overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: 16 }}>
@@ -401,9 +542,17 @@ const GroupChat: React.FC = () => {
             <span style={{ fontSize: 16, fontWeight: 'bold' }}>多 Agent 群聊</span>
           </div>
 
-          <Button type="primary" icon={<PlusOutlined />} block style={{ marginBottom: 16 }} onClick={handleNewSession}>
-            新建群聊
+          <Button type="primary" icon={<PlusOutlined />} block style={{ marginBottom: 16 }} onClick={openCreateSessionModal}>
+            新建协作房间
           </Button>
+
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="群聊 = 协作场景"
+            description="先在“配置”里选成员和模型，再创建房间；发送时会按全员、轮流或自由 @ 模式决定哪些 Agent 回复。"
+          />
 
           {/* 群聊列表 */}
           <Tabs defaultActiveKey="sessions" size="small" items={[
@@ -472,10 +621,28 @@ const GroupChat: React.FC = () => {
                       options={[
                         { value: 'all', label: '全员发言 - 所有 Agent 都回复' },
                         { value: 'sequential', label: '轮流发言 - 依次回复' },
-                        { value: 'free', label: '自由发言 - 仅 @ 的 Agent 回复' }
+                        { value: 'free', label: '自由发言 - 仅 @ 的 Agent 回复' },
+                        { value: 'team', label: 'Agent Team - 角色分工协作' }
                       ]}
                     />
                   </div>
+
+                  {/* Agent Team 模式：角色选择 + 任务分发 */}
+                  {mode === 'team' && (
+                    <>
+	                      <TeamRoleSelector
+	                        roles={teamRoles}
+	                        agents={availableAgents.map(a => ({ id: a.id || a.agentId, name: a.name || a.agentId, model: a.model }))}
+	                        models={modelOptions}
+	                        onChange={setTeamRoles}
+	                      />
+                      <TaskDistributor
+                        mode={distributionMode}
+                        onChange={setDistributionMode}
+                        participantCount={teamRoles.length}
+                      />
+                    </>
+                  )}
 
                   {/* 参与者列表 */}
                   <div style={{ marginBottom: 16 }}>
@@ -537,7 +704,7 @@ const GroupChat: React.FC = () => {
           <Space>
             <TeamOutlined style={{ color: '#1890ff' }} />
             <span style={{ fontSize: 16, fontWeight: 500 }}>{sessionName}</span>
-            <Tag>{mode === 'all' ? '全员' : mode === 'sequential' ? '轮流' : '自由'}</Tag>
+            <Tag>{mode === 'all' ? '全员' : mode === 'sequential' ? '轮流' : mode === 'free' ? '自由' : 'Team'}</Tag>
             <Tag color="blue">{participants.length} 人</Tag>
           </Space>
           <Space>
@@ -562,8 +729,9 @@ const GroupChat: React.FC = () => {
             ) : (
               messages.map(msg => {
                 const isUser = msg.sender === 'You'
+                const isSummary = msg.role_tag === 'summary'
                 const participant = participants.find(p => p.agentId === msg.sender)
-                const color = participant?.avatarColor || '#1890ff'
+                const color = isSummary ? '#722ed1' : (participant?.avatarColor || '#1890ff')
                 return (
                   <div key={msg.id} style={{ marginBottom: 12, display: 'flex', flexDirection: isUser ? 'row-reverse' : 'row' }}>
                     <Avatar
@@ -576,7 +744,7 @@ const GroupChat: React.FC = () => {
                         flexShrink: 0
                       }}
                     />
-                    <div style={{ maxWidth: '55%', minWidth: 'fit-content' }}>
+                    <div style={{ maxWidth: isSummary ? '72%' : '55%', minWidth: 'fit-content' }}>
                       <div style={{
                         fontSize: 12, color: '#999', marginBottom: 2,
                         textAlign: isUser ? 'right' : 'left'
@@ -584,13 +752,15 @@ const GroupChat: React.FC = () => {
                         {isUser ? '我' : (
                           <Space size={4}>
                             <span style={{ fontWeight: 600, color: color }}>{msg.sender}</span>
+                            {isSummary && <Tag color="purple" style={{ fontSize: 12, lineHeight: '16px' }}>汇总</Tag>}
                             {msg.model && <Tag style={{ fontSize: 12, lineHeight: '16px' }}>{getModelLabel(msg.model)}</Tag>}
                           </Space>
                         )}
                       </div>
                       <div style={{
-                        backgroundColor: isUser ? '#1890ff' : '#fff',
+                        backgroundColor: isUser ? '#1890ff' : isSummary ? '#f9f0ff' : '#fff',
                         color: isUser ? '#fff' : '#333',
+                        border: isSummary ? '1px solid #d3adf7' : 'none',
                         padding: '8px 12px', borderRadius: 10,
                         boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
                         fontSize: 12, lineHeight: 1.45,
@@ -614,6 +784,9 @@ const GroupChat: React.FC = () => {
                   </div>
                 )
               })
+            )}
+            {latestRunSteps.length > 0 && (
+              <AgentReplyTimeline replies={latestRunSteps} />
             )}
             {isLoading && (
               <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
@@ -842,6 +1015,81 @@ const GroupChat: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <Modal
+        title="新建多 Agent 协作房间"
+        open={createModalVisible}
+        onOk={() => createForm.submit()}
+        onCancel={() => setCreateModalVisible(false)}
+        okText="创建房间"
+        confirmLoading={creatingSession}
+        width={640}
+      >
+        <Alert
+          type={getParticipantWarning(createParticipants) ? 'warning' : 'success'}
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={getParticipantWarning(createParticipants) || '成员配置可用'}
+          description={`当前选择 ${createParticipants.length} 个成员，其中 ${getParticipantsWithModel(createParticipants).length} 个已选择模型。创建后仍可在左侧配置页继续调整。`}
+        />
+        <Form form={createForm} layout="vertical" onFinish={handleNewSession}>
+          <Form.Item
+            name="name"
+            label="房间名称"
+            rules={[{ required: true, message: '请输入房间名称' }]}
+          >
+            <Input placeholder="例如：产品方案评审、文档共创、技术辩论" />
+          </Form.Item>
+          <Form.Item
+            name="mode"
+            label="协作模式"
+            rules={[{ required: true }]}
+          >
+            <Select
+              options={[
+                { value: 'all', label: '全员发言：适合头脑风暴和多视角评审' },
+                { value: 'sequential', label: '轮流发言：适合结构化讨论和逐步推演' },
+                { value: 'free', label: '自由 @：适合只让指定 Agent 回复' },
+                { value: 'team', label: 'Agent Team：角色分工协作，支持并行/条件分发' }
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name="agentIds"
+            label="选择加入的 Agent"
+            rules={[{ required: true, message: '请选择至少一个 Agent' }]}
+          >
+            <Select
+              mode="multiple"
+              placeholder="选择哪些 Agent 加入这个房间"
+              options={createAgentOptions}
+              onChange={handleCreateAgentSelectionChange}
+              optionFilterProp="label"
+            />
+          </Form.Item>
+          <Card size="small" title="成员与模型">
+            <Space direction="vertical" style={{ width: '100%' }}>
+              {createParticipants.map((p, idx) => (
+                <Space key={`${p.agentId}-${idx}`} style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Avatar size="small" style={{ backgroundColor: p.avatarColor }}>{p.agentId.charAt(0)}</Avatar>
+                  <Text style={{ width: 140 }}>{getAgentLabel(p.agentId)}</Text>
+                  <Select
+                    size="small"
+                    style={{ flex: 1, minWidth: 280 }}
+                    value={p.model || undefined}
+                    options={modelOptions}
+                    placeholder="选择模型"
+                    onChange={value => handleCreateParticipantModelChange(idx, value)}
+                    optionFilterProp="label"
+                    showSearch
+                  />
+                </Space>
+              ))}
+              {createParticipants.length === 0 && <Empty description="请选择要加入的 Agent" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+            </Space>
+          </Card>
+        </Form>
+      </Modal>
     </div>
   )
 }

@@ -6,11 +6,11 @@
 echo "🚀 启动 OpenClaw Web UI..."
 
 # 设置环境变量
-export OPENCLAW_STATE_DIR="$HOME/.stepclaw"
-export PATH="$HOME/.stepclaw/bin:$PATH"
+export OPENCLAW_STATE_DIR="$HOME/Lingshu"
+export PATH="$HOME/Lingshu/bin:$PATH"
 
 # 项目目录
-PROJECT_DIR="$HOME/.stepclaw/workspace/projects/openclaw-web-ui"
+PROJECT_DIR="$HOME/Lingshu/workspace/projects/openclaw-web-ui"
 
 # 启动后端
 echo "📡 启动后端服务..."

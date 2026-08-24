@@ -1,7 +1,7 @@
 #!/bin/bash
-# OpenClaw Web UI 启动脚本
+# 灵枢 App 启动脚本
 
-echo "🚀 启动 OpenClaw Web UI..."
+echo "🚀 启动灵枢 App..."
 echo ""
 
 # 检查 Node.js
@@ -21,8 +21,8 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo ""
-echo "🔧 启动后端 API 服务 (端口 3001)..."
-node server.js &
+echo "🔧 启动后端 API 服务 (端口 3005)..."
+PORT=3005 node server-v2.js &
 API_PID=$!
 
 # 等待 API 启动
@@ -33,17 +33,17 @@ npm run dev &
 WEB_PID=$!
 
 echo ""
-echo "✅ OpenClaw Web UI 已启动!"
+echo "✅ 灵枢 App 已启动!"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  📱 访问地址:"
 echo "     前端界面: http://localhost:3000"
-echo "     API 服务: http://localhost:3001"
+echo "     API 服务: http://localhost:3005"
 echo ""
 echo "  📝 功能说明:"
 echo "     • 仪表盘 - 系统状态监控"
 echo "     • Skills 管理 - 安装/卸载 skills"
-echo "     • 配置管理 - 编辑 openclaw.json"
+echo "     • 配置管理 - 编辑灵枢运行时配置（兼容 openclaw.json）"
 echo "     • 日志查看 - 实时日志流"
 echo "     • 通知中心 - 消息提醒"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

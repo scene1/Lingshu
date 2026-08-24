@@ -1,72 +1,139 @@
 {
-  "name": "openclaw-web-ui",
-  "version": "1.0.0",
+  "name": "lingshu-app",
+  "version": "2.1.0",
   "description": "灵枢 - AI 路由与知识中枢",
+  "author": "Lingshu Contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scene1/Lingshu.git"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "start": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server.js",
-    "electron:dev": "NODE_ENV=development electron electron/main.cjs",
-    "electron:build": "npm run build && electron-builder",
-    "electron:build:mac": "npm run build && electron-builder --mac",
-    "electron:build:win": "npm run build && electron-builder --win",
-    "electron:build:linux": "npm run build && electron-builder --linux"
+    "start": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server-v2.js",
+    "dev:api": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server-v2.js",
+    "electron:dev": "bash dev-electron.sh",
+    "electron:start": "bash start-electron.sh",
+    "start:app": "vite build && bash start-electron.sh",
+    "electron:build": "npm run build && npm run bundle:server && electron-builder",
+    "electron:build:mac": "npm run build && npm run bundle:server && electron-builder --mac",
+    "electron:build:win": "npm run build && npm run bundle:server && electron-builder --win",
+    "electron:build:linux": "npm run build && npm run bundle:server && electron-builder --linux",
+    "bundle:server": "node scripts/build-server.mjs",
+    "test": "node --test server/core/*.test.js evals/conversation-runtime/*.test.js scripts/*.test.mjs",
+    "test:runtime": "node --test server/core/conversation-runtime.test.js",
+    "test:security": "node --test server/core/security.test.js",
+    "test:eval-baseline": "node --test evals/conversation-runtime/*.test.js",
+    "eval:conversation": "node evals/conversation-runtime/run-baseline.mjs",
+    "eval:conversation:save": "node evals/conversation-runtime/save-report.mjs",
+    "release:signing:status": "bash scripts/configure-release-signing.sh status",
+    "release:signing:configure": "bash scripts/configure-release-signing.sh configure",
+    "release:assets:verify": "node scripts/verify-release-assets.mjs",
+    "verify": "npm run build && npm run bundle:server"
   },
   "dependencies": {
     "@ant-design/icons": "^5.2.0",
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/lang-markdown": "^6.5.1",
+    "@uiw/react-codemirror": "^4.25.11",
     "antd": "^5.12.0",
     "axios": "^1.6.0",
     "cors": "^2.8.5",
     "dayjs": "^1.11.0",
+    "electron-updater": "^6.8.9",
     "express": "^4.18.0",
+    "markdown-it": "^14.3.0",
     "multer": "^2.2.0",
+    "node-cron": "^4.6.0",
+    "pdf-parse": "^1.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "^6.20.0",
+    "react-router-dom": "^7.18.2",
     "recharts": "^2.10.0",
     "remark-gfm": "^4.0.1",
-    "ws": "^8.14.0"
+    "ws": "^8.14.0",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@electron/notarize": "^3.1.1",
     "@types/node": "^20.19.41",
+    "@types/node-cron": "^3.0.11",
     "@types/react": "^18.3.29",
     "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^30.0.0",
-    "electron-builder": "^24.13.0",
+    "@vitejs/plugin-react": "^6.1.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21"
+    "vite": "^8.2.2",
+    "yaml": "^2.9.0"
   },
   "build": {
-    "appId": "com.openclaw.webui",
+    "appId": "com.lingshu.app",
     "productName": "灵枢",
     "directories": {
-      "output": "dist-electron"
+      "output": "dist-electron",
+      "buildResources": "build"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "scene1",
+        "repo": "Lingshu",
+        "releaseType": "release"
+      }
+    ],
+    "afterSign": "scripts/notarize.cjs",
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "deliverables/skill-runtime-manifest-example.md",
+      "deliverables/sample-skills/**/*",
       "package.json",
-      "server-v2.js"
+      "server-bundle.cjs"
+    ],
+    "asarUnpack": [
+      "server-bundle.cjs",
+      "dist/**/*"
     ],
     "mac": {
+      "artifactName": "Lingshu-v${version}-mac-${arch}.${ext}",
       "target": [
         {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
         }
       ],
-      "category": "public.app-category.productivity"
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "灵枢需要使用麦克风录制会议音频并生成会议纪要。"
+      },
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "win": {
-      "target": "nsis"
+      "artifactName": "Lingshu-v${version}-win-${arch}.${ext}",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "artifactName": "Lingshu-v${version}-win-${arch}-setup.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     },
     "linux": {
       "target": "AppImage"

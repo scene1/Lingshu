@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Table, Button, Space, Tag, Modal, Form, Input, Switch, message } from 'antd'
+import { Alert, Card, Table, Button, Space, Tag, Modal, Form, Input, Switch, message } from 'antd'
 import {
   ReloadOutlined, EditOutlined, ApiOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LinkOutlined
@@ -15,6 +15,7 @@ interface ChannelBase {
   lastActive: string
   messageCount: number
   type: 'generic' | 'wechat' | 'wecom'
+  lastTest?: { success: boolean; testedAt: string; durationMs?: number; message?: string }
 }
 
 interface GenericChannel extends ChannelBase {
@@ -39,8 +40,8 @@ const isWeChat = (c: Channel): c is WeChatChannel => c.type === 'wechat' || c.ty
 
 const CHANNEL_DEFAULTS: Channel[] = [
   {
-    id: 'weixin', name: '微信', icon: '💬', enabled: true,
-    status: 'connected', lastActive: '5分钟前', messageCount: 856,
+    id: 'weixin', name: '微信', icon: '💬', enabled: false,
+    status: 'disconnected', lastActive: '从未连接', messageCount: 0,
     type: 'wechat', corpId: '', agentId: '', secret: '', token: '', aesKey: '',
   },
   {
@@ -49,15 +50,15 @@ const CHANNEL_DEFAULTS: Channel[] = [
     type: 'wecom', corpId: '', agentId: '', secret: '', token: '', aesKey: '',
   },
   {
-    id: 'feishu', name: '飞书', icon: '📨', enabled: true,
-    appId: 'cli_a939d4facc395bef', appSecret: '••••••••••••••••',
-    webhook: '', status: 'connected', lastActive: '2分钟前', messageCount: 1240,
+    id: 'feishu', name: '飞书', icon: '📨', enabled: false,
+    appId: '', appSecret: '',
+    webhook: '', status: 'disconnected', lastActive: '从未连接', messageCount: 0,
     type: 'generic',
   },
   {
-    id: 'qqbot', name: 'QQ', icon: '🐧', enabled: true,
-    appId: '1903749752', appSecret: '••••••••••••••••',
-    webhook: '', status: 'connected', lastActive: '10分钟前', messageCount: 332,
+    id: 'qqbot', name: 'QQ', icon: '🐧', enabled: false,
+    appId: '', appSecret: '',
+    webhook: '', status: 'disconnected', lastActive: '从未连接', messageCount: 0,
     type: 'generic',
   },
   {
@@ -87,32 +88,39 @@ const ChannelManager: React.FC = () => {
   const loadChannels = async () => {
     setLoading(true)
     try {
-      const response = await fetch('/api/config')
+      const response = await fetch('/api/channels')
       if (response.ok) {
-        const config = await response.json()
-        const merged = CHANNEL_DEFAULTS.map(ch => {
-          const cfgChannel = config.channels?.[ch.id === 'weixin' ? 'openclaw-weixin' : ch.id]
+        const data = await response.json()
+        const savedById = new Map<string, Channel>((data.channels || []).map((item: Channel) => [item.id, item]))
+        const merged: Channel[] = CHANNEL_DEFAULTS.map(ch => {
+          const cfgChannel = savedById.get(ch.id)
           if (cfgChannel) {
             if (isWeChat(ch)) {
+              const cfg = cfgChannel as WeChatChannel
               return {
                 ...ch,
-                enabled: cfgChannel.enabled ?? ch.enabled,
-                corpId: cfgChannel.corpId || ch.corpId,
-                agentId: cfgChannel.agentId || ch.agentId,
-                secret: cfgChannel.secret ? '••••••••••••••••' : ch.secret,
-                token: cfgChannel.token || ch.token,
-                aesKey: cfgChannel.aesKey || ch.aesKey,
-                status: cfgChannel.enabled ? 'connected' as const : 'disconnected' as const,
+                ...cfg,
+                type: ch.type,
+                enabled: cfg.enabled ?? ch.enabled,
+                corpId: cfg.corpId || ch.corpId,
+                agentId: cfg.agentId || ch.agentId,
+                secret: cfg.secret || ch.secret,
+                token: cfg.token || ch.token,
+                aesKey: cfg.aesKey || ch.aesKey,
+                lastActive: cfg.lastTest?.testedAt ? new Date(cfg.lastTest.testedAt).toLocaleString('zh-CN', { hour12: false }) : ch.lastActive,
               }
             }
+            const cfg = cfgChannel as GenericChannel
             return {
               ...ch,
-              enabled: cfgChannel.enabled ?? ch.enabled,
-              appId: cfgChannel.appId || ch.appId,
-              appSecret: cfgChannel.appSecret ? '••••••••••••••••' : ch.appSecret,
-              webhook: cfgChannel.webhook || ch.webhook,
-              status: cfgChannel.enabled ? 'connected' as const : 'disconnected' as const,
-            }
+              ...cfg,
+              type: 'generic' as const,
+              enabled: cfg.enabled ?? ch.enabled,
+              appId: cfg.appId || ch.appId,
+              appSecret: cfg.appSecret || ch.appSecret,
+              webhook: cfg.webhook || ch.webhook,
+              lastActive: cfg.lastTest?.testedAt ? new Date(cfg.lastTest.testedAt).toLocaleString('zh-CN', { hour12: false }) : ch.lastActive,
+            } as GenericChannel
           }
           return ch
         })
@@ -151,64 +159,34 @@ const ChannelManager: React.FC = () => {
 
   const handleToggle = async (channelId: string, enabled: boolean) => {
     try {
-      const resp = await fetch('/api/config')
-      const config = await resp.json()
-      if (!config.channels) config.channels = {}
-      const configKey = channelId === 'weixin' ? 'openclaw-weixin' : channelId
-      if (!config.channels[configKey]) config.channels[configKey] = {}
-      config.channels[configKey].enabled = enabled
-      await fetch('/api/config', {
-        method: 'POST',
+      const response = await fetch(`/api/channels/${channelId}`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
+        body: JSON.stringify({ enabled }),
       })
+      if (!response.ok) throw new Error('更新渠道失败')
       message.success(`${enabled ? '已启用' : '已停用'} ${channelId}`)
-      loadChannels()
-    } catch {
-      setChannels(channels.map(c => c.id === channelId ? { ...c, enabled, status: enabled ? 'connected' as const : 'disconnected' as const } : c))
-      message.success('已更新')
+      await loadChannels()
+    } catch (error: any) {
+      message.error(error.message || '更新渠道失败')
     }
   }
 
   const handleSave = async (values: any) => {
     if (!editingChannel?.id) return
     try {
-      const resp = await fetch('/api/config')
-      const config = await resp.json()
-      if (!config.channels) config.channels = {}
-      const configKey = editingChannel.id === 'weixin' ? 'openclaw-weixin' : editingChannel.id
-      if (!config.channels[configKey]) config.channels[configKey] = {}
-
-      if (isWeChat(editingChannel)) {
-        Object.assign(config.channels[configKey], {
-          enabled: values.enabled,
-          corpId: values.corpId,
-          agentId: values.agentId,
-          secret: values.secret,
-          token: values.token,
-          aesKey: values.aesKey,
-        })
-      } else {
-        Object.assign(config.channels[configKey], {
-          enabled: values.enabled,
-          appId: values.appId,
-          appSecret: values.appSecret,
-          webhook: values.webhook,
-        })
-      }
-
-      await fetch('/api/config', {
-        method: 'POST',
+      const response = await fetch(`/api/channels/${editingChannel.id}`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
+        body: JSON.stringify(values),
       })
+      const data = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(data?.message || data?.error || '保存渠道失败')
       message.success('配置已保存')
       setModalVisible(false)
-      loadChannels()
-    } catch {
-      setChannels(channels.map(c => c.id === editingChannel?.id ? { ...c, ...values } : c))
-      setModalVisible(false)
-      message.success('已保存（仅本地）')
+      await loadChannels()
+    } catch (error: any) {
+      message.error(error.message || '保存渠道失败')
     }
   }
 
@@ -217,11 +195,12 @@ const ChannelManager: React.FC = () => {
     setTestingChannel(editingChannel.id)
     try {
       const response = await fetch(`/api/channels/${editingChannel.id}/test`, { method: 'POST' })
-      const result = await response.json()
+      const result = await response.json().catch(() => null)
       if (result.success) {
         message.success(`测试连接成功：${result.message || '连通性正常'}`)
+        await loadChannels()
       } else {
-        message.error(`测试失败：${result.error || '无法连接到服务器'}`)
+        message.error(`测试失败：${result?.message || result?.error || '无法连接到服务器'}`)
       }
     } catch {
       message.error('测试请求失败，请检查网络或后端服务')
@@ -232,7 +211,7 @@ const ChannelManager: React.FC = () => {
 
   const getStatusTag = (status: string) => {
     switch (status) {
-      case 'connected': return <Tag icon={<CheckCircleOutlined />} color="success">已连接</Tag>
+      case 'connected': return <Tag icon={<CheckCircleOutlined />} color="success">鉴权通过</Tag>
       case 'disconnected': return <Tag icon={<CloseCircleOutlined />} color="default">未连接</Tag>
       case 'error': return <Tag icon={<CloseCircleOutlined />} color="error">错误</Tag>
       default: return <Tag>{status}</Tag>
@@ -309,8 +288,8 @@ const ChannelManager: React.FC = () => {
     if (isWeChat(editingChannel)) {
       return (
         <>
-          <Form.Item name="corpId" label="企业 ID (Corp ID)" rules={[{ required: true, message: '请输入企业 ID' }]}>
-            <Input placeholder="企业微信后台 → 我的企业 → 企业信息" />
+          <Form.Item name="corpId" label={editingChannel.id === 'weixin' ? 'App ID' : '企业 ID (Corp ID)'} rules={[{ required: true, message: editingChannel.id === 'weixin' ? '请输入 App ID' : '请输入企业 ID' }]}>
+            <Input placeholder={editingChannel.id === 'weixin' ? '微信公众平台 → 开发 → 基本配置' : '企业微信后台 → 我的企业 → 企业信息'} />
           </Form.Item>
           <Form.Item name="agentId" label="应用 ID (Agent ID)">
             <Input placeholder="应用管理 → 应用详情 → AgentId" />
@@ -352,11 +331,11 @@ const ChannelManager: React.FC = () => {
 
     return (
       <>
-        <Form.Item name="appId" label="App ID" rules={[{ required: true, message: '请输入 App ID' }]}>
-          <Input placeholder="从开放平台获取" />
+        <Form.Item name="appId" label={editingChannel.id === 'telegram' ? 'Bot 用户名（可选）' : 'App ID'} rules={editingChannel.id === 'telegram' ? [] : [{ required: true, message: '请输入 App ID' }]}>
+          <Input placeholder={editingChannel.id === 'telegram' ? '@your_bot' : '从开放平台获取'} />
         </Form.Item>
-        <Form.Item name="appSecret" label="App Secret">
-          <Input.Password placeholder="从开放平台获取" />
+        <Form.Item name="appSecret" label={editingChannel.id === 'telegram' ? 'Bot Token' : 'App Secret'} rules={[{ required: true, message: editingChannel.id === 'telegram' ? '请输入 Bot Token' : '请输入 App Secret' }]}>
+          <Input.Password placeholder={editingChannel.id === 'telegram' ? '从 BotFather 获取' : '从开放平台获取'} />
         </Form.Item>
         <Form.Item name="webhook" label="Webhook URL（可选）">
           <Input placeholder="https://..." />
@@ -376,11 +355,19 @@ const ChannelManager: React.FC = () => {
         <Space direction="vertical" style={{ width: '100%' }}>
           <div style={{ fontWeight: 500 }}>一键接入说明</div>
           <span style={{ color: '#666', fontSize: 13 }}>
-            OpenClaw 支持将 AI Agent 一键接入飞书、微信、QQ、钉钉、企业微信、Telegram 等多个即时通讯平台。
+            灵枢支持将 AI Agent 一键接入飞书、微信、QQ、钉钉、企业微信、Telegram 等多个即时通讯平台。
             配置正确的凭证后，用户即可在这些平台上与你的 Agent 对话。所有渠道共享同一套 Agent 和 Skills 配置。
           </span>
         </Space>
       </Card>
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="凭证按渠道独立保存"
+        description="连接测试会调用对应平台的官方鉴权接口，不会发送消息。绿色状态代表最近一次鉴权通过；入站回调仍需在平台后台配置公开可访问的回调地址。"
+      />
 
       <Card
         extra={
@@ -392,6 +379,7 @@ const ChannelManager: React.FC = () => {
           dataSource={channels}
           rowKey="id"
           loading={loading}
+          scroll={{ x: 840 }}
           pagination={false}
         />
       </Card>

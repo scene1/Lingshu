@@ -1,0 +1,92 @@
+name: Conversation Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: '运行真实模型评测（会产生模型调用费用）'
+        required: true
+        type: boolean
+        default: false
+      cost_approval:
+        description: '确认费用时填写 APPROVE'
+        required: false
+        type: string
+        default: ''
+      case_limit:
+        description: '每个模型运行的样本数（1-60）'
+        required: false
+        type: string
+        default: '10'
+      model_a:
+        description: '主模型 provider/model；留空则使用仓库变量'
+        required: false
+        type: string
+        default: ''
+      model_b:
+        description: '对比模型 provider/model；可留空'
+        required: false
+        type: string
+        default: ''
+  schedule:
+    - cron: '30 18 * * *'
+
+jobs:
+  protocol-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run verify
+
+  live-baseline:
+    if: ${{ (github.event_name == 'schedule' && vars.ENABLE_LINGSHU_LIVE_REGRESSION == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_live == true && inputs.cost_approval == 'APPROVE') }}
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check local Lingshu runtime
+        run: curl -fsS --max-time 10 "${LINGSHU_EVAL_BASE_URL}/api/health"
+        env:
+          LINGSHU_EVAL_BASE_URL: ${{ vars.LINGSHU_EVAL_BASE_URL || 'http://127.0.0.1:3005' }}
+      - name: Run full baseline for provider A
+        run: npm run eval:conversation
+        env:
+          LINGSHU_EVAL_MODEL: ${{ inputs.model_a || vars.LINGSHU_EVAL_MODEL_A || vars.LINGSHU_EVAL_MODEL }}
+          LINGSHU_EVAL_POLICY_ID: ${{ vars.LINGSHU_EVAL_POLICY_ID }}
+          LINGSHU_EVAL_LIMIT: ${{ inputs.case_limit || vars.LINGSHU_EVAL_LIMIT || '60' }}
+          LINGSHU_EVAL_ENDPOINT: ${{ vars.LINGSHU_EVAL_BASE_URL || 'http://127.0.0.1:3005' }}/api/instances/local/sessions/nightly-conversation-regression/chat
+      - name: Preserve provider A report
+        if: always()
+        run: cp evals/conversation-runtime/latest-report.json evals/conversation-runtime/provider-a-report.json
+      - name: Run full baseline for provider B
+        if: ${{ always() && (inputs.model_b != '' || vars.LINGSHU_EVAL_MODEL_B != '') }}
+        run: npm run eval:conversation
+        env:
+          LINGSHU_EVAL_MODEL: ${{ inputs.model_b || vars.LINGSHU_EVAL_MODEL_B }}
+          LINGSHU_EVAL_POLICY_ID: ${{ vars.LINGSHU_EVAL_POLICY_ID }}
+          LINGSHU_EVAL_LIMIT: ${{ inputs.case_limit || vars.LINGSHU_EVAL_LIMIT || '60' }}
+          LINGSHU_EVAL_ENDPOINT: ${{ vars.LINGSHU_EVAL_BASE_URL || 'http://127.0.0.1:3005' }}/api/instances/local/sessions/nightly-conversation-regression/chat
+      - name: Preserve provider B report
+        if: ${{ always() && (inputs.model_b != '' || vars.LINGSHU_EVAL_MODEL_B != '') }}
+        run: cp evals/conversation-runtime/latest-report.json evals/conversation-runtime/provider-b-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conversation-regression-report
+          path: |
+            evals/conversation-runtime/latest-report.json
+            evals/conversation-runtime/provider-a-report.json
+            evals/conversation-runtime/provider-b-report.json
+          if-no-files-found: ignore

@@ -6,7 +6,7 @@
 
 #### 方式 1: 命令行启动
 ```bash
-~/.stepclaw/workspace/projects/openclaw-web-ui/launch.sh
+~/Lingshu/workspace/projects/openclaw-web-ui/launch.sh
 ```
 
 #### 方式 2: 双击应用图标
@@ -30,7 +30,7 @@
 | 模型配置 | ✅ | 17 家提供商，100+ 模型 |
 | Skills 管理 | ✅ | 37 个 skills |
 | 系统状态 | ✅ | 记忆和上下文展示 |
-| 聊天历史 | ✅ | 文件存储在 ~/.stepclaw/workspace/chat-history/ |
+| 聊天历史 | ✅ | 文件存储在 ~/Lingshu/workspace/chat-history/ |
 
 ### 🔧 模型配置
 
@@ -47,7 +47,7 @@
 ### 📝 日志位置
 
 ```
-~/.stepclaw/workspace/projects/openclaw-web-ui/
+~/Lingshu/workspace/projects/openclaw-web-ui/
 ├── backend.log   # 后端日志
 └── frontend.log  # 前端日志
 ```
@@ -64,14 +64,14 @@ lsof -ti :3000 :3005 | xargs kill -9
 ```bash
 # OpenClaw Web UI 自动启动
 if ! curl -s http://localhost:3000 > /dev/null; then
-    nohup ~/.stepclaw/workspace/projects/openclaw-web-ui/launch.sh > /dev/null 2>&1 &
+    nohup ~/Lingshu/workspace/projects/openclaw-web-ui/launch.sh > /dev/null 2>&1 &
 fi
 ```
 
 ### 📁 应用文件
 
 ```
-~/.stepclaw/workspace/projects/openclaw-web-ui/
+~/Lingshu/workspace/projects/openclaw-web-ui/
 ├── launch.sh              # 启动脚本
 ├── start-app.sh           # 简化启动脚本
 ├── server-v2.js           # 后端服务

@@ -72,7 +72,7 @@ const Logs: React.FC = () => {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `openclaw-logs-${dayjs().format('YYYYMMDD-HHmmss')}.txt`
+    a.download = `lingshu-logs-${dayjs().format('YYYYMMDD-HHmmss')}.txt`
     a.click()
     URL.revokeObjectURL(url)
     message.success('日志导出成功')

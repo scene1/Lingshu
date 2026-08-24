@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  signing-preflight-macos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require Apple signing and notarization credentials
+        shell: bash
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=()
+          for name in MAC_CSC_LINK MAC_CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf 'Missing macOS release secrets: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          if [[ ! "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "APPLE_TEAM_ID must contain 10 uppercase letters or digits."
+            exit 1
+          fi
+          echo "Apple signing and notarization credentials are configured."
+
+  signing-preflight-windows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require Windows Authenticode credentials
+        shell: bash
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in WIN_CSC_LINK WIN_CSC_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf 'Missing Windows release secrets: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          echo "Windows Authenticode credentials are configured."
+
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run verify
+
+  build-macos:
+    needs: [verify, signing-preflight-macos]
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run bundle:server
+      - run: npx electron-builder --mac --arm64 --x64 --publish never
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify Developer ID signature and notarization ticket
+        shell: bash
+        run: |
+          app_count="$(find dist-electron -maxdepth 3 -type d -name '*.app' | wc -l | tr -d ' ')"
+          if [ "$app_count" -ne 2 ]; then
+            echo "Expected two macOS app bundles, found $app_count."
+            exit 1
+          fi
+          while IFS= read -r app_bundle; do
+            echo "Verifying $app_bundle"
+            codesign --verify --deep --strict --verbose=2 "$app_bundle"
+            signature_info="$(codesign -dv --verbose=4 "$app_bundle" 2>&1)"
+            printf '%s\n' "$signature_info"
+            printf '%s\n' "$signature_info" | grep -Fq 'Authority=Developer ID Application:'
+            xcrun stapler validate "$app_bundle"
+            spctl --assess --type execute --verbose=4 "$app_bundle"
+          done < <(find dist-electron -maxdepth 3 -type d -name '*.app' -print)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+            dist-electron/*.yml
+            dist-electron/*.blockmap
+          if-no-files-found: error
+
+  build-windows:
+    needs: [verify, signing-preflight-windows]
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run bundle:server
+      - run: npx electron-builder --win --x64 --publish never
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      - name: Verify Windows Authenticode signature
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem dist-electron -Filter *.exe
+          if ($installers.Count -ne 1) {
+            throw "Expected one Windows installer, found $($installers.Count)."
+          }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature $installer.FullName
+            Write-Host "$($installer.Name): $($signature.Status) - $($signature.SignerCertificate.Subject)"
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($installer.Name): $($signature.StatusMessage)"
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.zip
+            dist-electron/*.yml
+            dist-electron/*.blockmap
+          if-no-files-found: error
+
+  publish:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify updater metadata and release assets
+        shell: bash
+        run: npm run release:assets:verify -- --dir release-assets --version "${GITHUB_REF_NAME#v}"
+      - name: Generate release title and checksums
+        id: meta
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "title=灵枢 V${VERSION}" >> "$GITHUB_OUTPUT"
+          cd release-assets
+          sha256sum Lingshu-* > "Lingshu-v${VERSION}-SHA256SUMS.txt"
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.meta.outputs.title }}
+          tag_name: ${{ github.ref_name }}
+          body_path: deliverables/release-v2.1.0.md
+          files: release-assets/*
+          draft: false
+          prerelease: false

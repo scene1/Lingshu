@@ -2,15 +2,27 @@ import React, { useState, useEffect } from 'react'
 import {
   Layout, Tabs, Card, Form, Select, Switch, Button,
   Typography, Space, Tag, Divider, message, Modal, Input,
-  List, Spin, Statistic, InputNumber
+  List, Spin, Statistic, InputNumber, Checkbox, Alert, Upload, Slider
 } from 'antd'
 import {
   SettingOutlined, RobotOutlined, DatabaseOutlined,
   ThunderboltOutlined, InfoCircleOutlined, ExportOutlined,
   ImportOutlined, DeleteOutlined, ClearOutlined, KeyOutlined,
   GlobalOutlined, CheckCircleOutlined, ExclamationCircleOutlined,
-  SaveOutlined, FolderOpenOutlined, SearchOutlined
+  SaveOutlined, FolderOpenOutlined, SearchOutlined,
+  GithubOutlined, BugOutlined, SyncOutlined, PictureOutlined, UploadOutlined, DownloadOutlined
 } from '@ant-design/icons'
+import packageJson from '../../package.json'
+import {
+  AppUpdateState,
+  checkForUpdates,
+  downloadUpdate,
+  getDesktopCapabilities,
+  getElectronAPI,
+  getUpdateState,
+  installUpdate,
+  openExternal
+} from '../utils/electron'
 import { PROVIDERS } from './ModelConfig'
 import { useSettings } from '../contexts/SettingsContext'
 
@@ -28,17 +40,107 @@ const Settings: React.FC = () => {
   const [resetConfirmVisible, setResetConfirmVisible] = useState(false)
   const [obsidianStatus, setObsidianStatus] = useState<any>(null)
   const [testingObsidian, setTestingObsidian] = useState(false)
+  const [memorySyncItems, setMemorySyncItems] = useState<any[]>([])
+  const [selectedMemoryKeys, setSelectedMemoryKeys] = useState<string[]>([])
+  const [loadingMemorySync, setLoadingMemorySync] = useState(false)
+  const [syncingMemory, setSyncingMemory] = useState(false)
+  const [memorySyncQuery, setMemorySyncQuery] = useState('')
+  const [memorySyncAgentFilter, setMemorySyncAgentFilter] = useState('all')
+  const [memorySyncStatusFilter, setMemorySyncStatusFilter] = useState<'all' | 'unsynced' | 'synced'>('unsynced')
+  const [includeSyncedMemory, setIncludeSyncedMemory] = useState(false)
+  const [memorySyncPreviewVisible, setMemorySyncPreviewVisible] = useState(false)
+  const [pendingMemorySyncKeys, setPendingMemorySyncKeys] = useState<string[]>([])
+  const [archivingConversations, setArchivingConversations] = useState(false)
+  const [conversationArchiveResult, setConversationArchiveResult] = useState<any>(null)
   const [agentWorkspace, setAgentWorkspace] = useState('')
   const [savingWorkspace, setSavingWorkspace] = useState(false)
+  const [isolationStatus, setIsolationStatus] = useState<any>(null)
+  const [savingIsolation, setSavingIsolation] = useState(false)
+  const [desktopCapabilities, setDesktopCapabilities] = useState<any>(null)
+  const [uploadingBackground, setUploadingBackground] = useState(false)
+  const [updateState, setUpdateState] = useState<AppUpdateState | null>(null)
+  const [updateActionLoading, setUpdateActionLoading] = useState(false)
   const [form] = Form.useForm()
   const { updateSettings } = useSettings()
+  const defaultBackgroundSettings = {
+    enabled: false,
+    url: '',
+    fit: 'cover',
+    opacity: 0.82,
+    position: 'center',
+    repeat: 'no-repeat'
+  }
+  const backgroundSettings = {
+    ...defaultBackgroundSettings,
+    ...(settings?.appearance?.background || {})
+  }
+  const filteredMemorySyncItems = memorySyncItems.filter(item => {
+    const synced = !!item.syncedToObsidian?.relativePath
+    if (memorySyncStatusFilter === 'unsynced' && synced) return false
+    if (memorySyncStatusFilter === 'synced' && !synced) return false
+    if (memorySyncAgentFilter !== 'all' && item.agent !== memorySyncAgentFilter) return false
+    const query = memorySyncQuery.trim().toLowerCase()
+    if (!query) return true
+    const text = [
+      item.key,
+      item.agent,
+      item.timestamp,
+      typeof item.value === 'string' ? item.value : JSON.stringify(item.value || {})
+    ].join('\n').toLowerCase()
+    return text.includes(query)
+  })
+  const unsyncedMemoryItems = filteredMemorySyncItems.filter(item => !item.syncedToObsidian?.relativePath)
+  const shownMemorySyncItems = filteredMemorySyncItems.slice(0, 12)
+  const memorySyncAgentOptions = [
+    { label: '全部 Agent', value: 'all' },
+    ...[...new Set(memorySyncItems.map(item => item.agent).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
+      .map(agent => ({ label: agent, value: agent }))
+  ]
 
   useEffect(() => {
     loadSettings()
     loadModels()
     loadConfigs()
     loadObsidianStatus()
+    loadMemorySyncStatus()
+    loadIsolationStatus()
+    loadDesktopCapabilities()
+    getUpdateState().then(state => state && setUpdateState(state)).catch(() => {})
+    const disposeUpdateListener = getElectronAPI()?.onUpdateState?.(setUpdateState)
+    return () => disposeUpdateListener?.()
   }, [])
+
+  const handleCheckForUpdates = async () => {
+    setUpdateActionLoading(true)
+    try {
+      const state = await checkForUpdates()
+      if (state) setUpdateState(state)
+      else message.info('网页版不支持应用内更新，请从 GitHub Releases 下载桌面版')
+    } finally {
+      setUpdateActionLoading(false)
+    }
+  }
+
+  const handleDownloadUpdate = async () => {
+    setUpdateActionLoading(true)
+    try {
+      const state = await downloadUpdate()
+      if (state) setUpdateState(state)
+    } finally {
+      setUpdateActionLoading(false)
+    }
+  }
+
+  const handleInstallUpdate = async () => {
+    setUpdateActionLoading(true)
+    try {
+      const result = await installUpdate()
+      if (!result?.success) message.warning('更新尚未下载完成')
+    } finally {
+      setUpdateActionLoading(false)
+    }
+  }
 
   const loadSettings = async () => {
     try {
@@ -47,6 +149,7 @@ const Settings: React.FC = () => {
         const data = await res.json()
         setSettings(data)
         form.setFieldsValue(data.general || {})
+        updateSettings(data.general || {}, data.appearance || {})
       }
     } catch (e) { console.warn('加载设置失败:', e) }
     setLoading(false)
@@ -127,7 +230,9 @@ const Settings: React.FC = () => {
       })
       if (res.ok) {
         message.success('设置已保存')
-        updateSettings(general)
+        const saved = await res.json()
+        setSettings(saved)
+        updateSettings(saved.general || general, saved.appearance || updated.appearance || {})
         // 从服务器重新拉取，确保 dataDir / cacheSize 等动态字段正确
         await loadSettings()
       } else {
@@ -135,6 +240,83 @@ const Settings: React.FC = () => {
       }
     } catch (e) { console.warn('保存失败:', e); message.error('保存失败') }
     setSaving(false)
+  }
+
+  const updateBackgroundDraft = (patch: Record<string, any>) => {
+    setSettings((prev: any) => ({
+      ...prev,
+      appearance: {
+        ...(prev?.appearance || {}),
+        background: {
+          ...defaultBackgroundSettings,
+          ...(prev?.appearance?.background || {}),
+          ...patch
+        }
+      }
+    }))
+  }
+
+  const saveAppearanceSettings = async (nextBackground = backgroundSettings, showSuccess = true) => {
+    setSaving(true)
+    try {
+      const updated = {
+        ...settings,
+        appearance: {
+          ...(settings?.appearance || {}),
+          background: {
+            ...defaultBackgroundSettings,
+            ...nextBackground
+          }
+        }
+      }
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated)
+      })
+      if (!res.ok) throw new Error('保存失败')
+      const saved = await res.json()
+      setSettings(saved)
+      updateSettings(saved.general || updated.general || {}, saved.appearance || updated.appearance)
+      if (showSuccess) message.success('外观背景已保存')
+      return true
+    } catch (e) {
+      console.warn('保存外观背景失败:', e)
+      message.error('保存外观背景失败')
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleBackgroundUpload = async (file: File) => {
+    setUploadingBackground(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await fetch('/api/appearance/background/upload', {
+        method: 'POST',
+        body: formData
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || '上传失败')
+      const nextBackground = {
+        enabled: true,
+        url: data.url,
+        fit: 'cover',
+        opacity: 0.82,
+        position: 'center',
+        repeat: 'no-repeat'
+      }
+      updateBackgroundDraft(nextBackground)
+      await saveAppearanceSettings(nextBackground, false)
+      message.success('背景图片已上传')
+    } catch (e: any) {
+      console.warn('上传背景图片失败:', e)
+      message.error(e.message || '上传背景图片失败')
+    } finally {
+      setUploadingBackground(false)
+    }
   }
 
   const updateObsidianSetting = (key: string, value: any) => {
@@ -197,6 +379,127 @@ const Settings: React.FC = () => {
     setTestingObsidian(false)
   }
 
+  const loadMemorySyncStatus = async () => {
+    setLoadingMemorySync(true)
+    try {
+      const res = await fetch('/api/memory/sync-to-obsidian')
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '读取失败')
+      setMemorySyncItems(Array.isArray(data.memories) ? data.memories : [])
+    } catch (error: any) {
+      console.warn('读取记忆同步状态失败:', error)
+    } finally {
+      setLoadingMemorySync(false)
+    }
+  }
+
+  const loadIsolationStatus = async () => {
+    try {
+      const res = await fetch('/api/security/isolation')
+      if (res.ok) setIsolationStatus(await res.json())
+    } catch (e) {
+      console.warn('读取隔离策略失败:', e)
+    }
+  }
+
+  const loadDesktopCapabilities = async () => {
+    try {
+      const capabilities = await getDesktopCapabilities()
+      setDesktopCapabilities(capabilities)
+    } catch (_) {
+      setDesktopCapabilities(null)
+    }
+  }
+
+  const updateIsolationPolicy = (patch: Record<string, any>) => {
+    setIsolationStatus((prev: any) => ({
+      ...prev,
+      policy: {
+        ...(prev?.policy || {}),
+        ...patch,
+      }
+    }))
+  }
+
+  const saveIsolationPolicy = async () => {
+    setSavingIsolation(true)
+    try {
+      const res = await fetch('/api/security/isolation', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(isolationStatus?.policy || {})
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '保存失败')
+      setIsolationStatus(data)
+      message.success('权限与隔离策略已保存')
+    } catch (error: any) {
+      message.error(error.message || '保存隔离策略失败')
+    } finally {
+      setSavingIsolation(false)
+    }
+  }
+
+  const syncMemoryToObsidian = async (keys: string[], includeSynced = false) => {
+    setSyncingMemory(true)
+    try {
+      const res = await fetch('/api/memory/sync-to-obsidian', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys, includeSynced })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '同步失败')
+      message.success(`已同步 ${data.synced?.length || 0} 条记忆${data.skipped?.length ? `，跳过 ${data.skipped.length} 条` : ''}`)
+      setSelectedMemoryKeys([])
+      setPendingMemorySyncKeys([])
+      setMemorySyncPreviewVisible(false)
+      await loadMemorySyncStatus()
+    } catch (error: any) {
+      message.error(error.message || '同步记忆失败')
+    } finally {
+      setSyncingMemory(false)
+    }
+  }
+
+  const getMemorySyncKeys = (mode: 'filtered' | 'selected') => {
+    const source = mode === 'selected'
+      ? memorySyncItems.filter(item => selectedMemoryKeys.includes(item.key))
+      : filteredMemorySyncItems
+    return source
+      .filter(item => includeSyncedMemory || !item.syncedToObsidian?.relativePath)
+      .map(item => item.key)
+  }
+
+  const openMemorySyncPreview = (mode: 'filtered' | 'selected') => {
+    const keys = getMemorySyncKeys(mode)
+    if (keys.length === 0) {
+      message.info(includeSyncedMemory ? '没有符合筛选条件的记忆。' : '没有符合筛选条件的未同步记忆。')
+      return
+    }
+    setPendingMemorySyncKeys(keys)
+    setMemorySyncPreviewVisible(true)
+  }
+
+  const archiveConversationsToObsidian = async () => {
+    setArchivingConversations(true)
+    try {
+      const res = await fetch('/api/conversations/archive-to-obsidian', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ includeEmpty: false })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '归档失败')
+      setConversationArchiveResult(data)
+      message.success(`已归档 ${data.archived?.length || 0} 个会话，跳过 ${data.skipped?.length || 0} 个`)
+    } catch (error: any) {
+      message.error(error.message || '归档会话失败')
+    } finally {
+      setArchivingConversations(false)
+    }
+  }
+
   // 清除缓存
   const handleClearCache = async () => {
     try {
@@ -222,7 +525,7 @@ const Settings: React.FC = () => {
       const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = `openclaw-backup-${new Date().toISOString().slice(0, 10)}.json`
+      a.href = url; a.download = `lingshu-backup-${new Date().toISOString().slice(0, 10)}.json`
       a.click(); URL.revokeObjectURL(url)
       message.success('导出成功')
     } catch (_) { message.error('导出失败') }
@@ -337,7 +640,7 @@ const Settings: React.FC = () => {
         <Select options={[
           { value: 'last', label: '打开上次会话' },
           { value: 'new', label: '新建会话' },
-          { value: 'dashboard', label: '显示 Dashboard' }
+          { value: 'system-overview', label: '显示系统概览' }
         ]} />
       </Form.Item>
       <Form.Item name="fontSize" label={<Text strong>消息字体大小 Font Size</Text>}>
@@ -450,7 +753,7 @@ const Settings: React.FC = () => {
           <Input
             value={agentWorkspace}
             onChange={e => setAgentWorkspace(e.target.value)}
-            placeholder="例如：/Users/xxx/.stepclaw/workspace"
+            placeholder="例如：~/Lingshu/workspace"
             style={{ fontFamily: 'monospace' }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -539,6 +842,165 @@ const Settings: React.FC = () => {
                 : obsidianStatus.reason || '尚未连接 Obsidian Vault。'}
             </Paragraph>
           )}
+          <Divider style={{ margin: '8px 0' }} />
+          <Card size="small" title="手动同步记忆到知识库">
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Space wrap>
+                <Input.Search
+                  allowClear
+                  size="small"
+                  placeholder="按 key / 内容搜索"
+                  value={memorySyncQuery}
+                  onChange={event => setMemorySyncQuery(event.target.value)}
+                  style={{ width: 220 }}
+                />
+                <Select
+                  size="small"
+                  value={memorySyncAgentFilter}
+                  onChange={setMemorySyncAgentFilter}
+                  options={memorySyncAgentOptions}
+                  style={{ width: 160 }}
+                />
+                <Select
+                  size="small"
+                  value={memorySyncStatusFilter}
+                  onChange={setMemorySyncStatusFilter}
+                  options={[
+                    { label: '仅未同步', value: 'unsynced' },
+                    { label: '仅已同步', value: 'synced' },
+                    { label: '全部状态', value: 'all' }
+                  ]}
+                  style={{ width: 120 }}
+                />
+                <Checkbox
+                  checked={includeSyncedMemory}
+                  onChange={event => setIncludeSyncedMemory(event.target.checked)}
+                >
+                  允许重复同步已同步项
+                </Checkbox>
+              </Space>
+              <Space wrap>
+                <Tag color="blue">筛选 {filteredMemorySyncItems.length} / 共 {memorySyncItems.length} 条</Tag>
+                <Tag color={unsyncedMemoryItems.length ? 'gold' : 'green'}>未同步 {unsyncedMemoryItems.length} 条</Tag>
+                <Button size="small" onClick={loadMemorySyncStatus} loading={loadingMemorySync}>刷新</Button>
+                <Button
+                  size="small"
+                  type="primary"
+                  disabled={getMemorySyncKeys('filtered').length === 0}
+                  loading={syncingMemory}
+                  onClick={() => openMemorySyncPreview('filtered')}
+                >
+                  同步当前筛选
+                </Button>
+                <Button
+                  size="small"
+                  disabled={selectedMemoryKeys.length === 0}
+                  loading={syncingMemory}
+                  onClick={() => openMemorySyncPreview('selected')}
+                >
+                  同步选中
+                </Button>
+              </Space>
+              <Spin spinning={loadingMemorySync}>
+                {shownMemorySyncItems.length > 0 ? (
+                  <List
+                    size="small"
+                    dataSource={shownMemorySyncItems}
+                    renderItem={item => {
+                      const checked = selectedMemoryKeys.includes(item.key)
+                      const synced = !!item.syncedToObsidian?.relativePath
+                      return (
+                        <List.Item>
+                          <Space align="start" style={{ width: '100%' }}>
+                            <Checkbox
+                              checked={checked}
+                              onChange={event => {
+                                setSelectedMemoryKeys(prev => event.target.checked
+                                  ? [...new Set([...prev, item.key])]
+                                  : prev.filter(key => key !== item.key))
+                              }}
+                            />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <Space size={6} wrap>
+                                <Text strong ellipsis style={{ maxWidth: 260 }}>{item.key}</Text>
+                                {item.agent && <Tag>{item.agent}</Tag>}
+                                {synced ? <Tag color="green">已同步</Tag> : <Tag color="gold">未同步</Tag>}
+                              </Space>
+                              <Paragraph type="secondary" ellipsis={{ rows: 2 }} style={{ margin: '4px 0 0' }}>
+                                {typeof item.value === 'string' ? item.value : JSON.stringify(item.value)}
+                              </Paragraph>
+                              {synced && (
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  {item.syncedToObsidian.relativePath}
+                                </Text>
+                              )}
+                            </div>
+                          </Space>
+                        </List.Item>
+                      )
+                    }}
+                  />
+                ) : (
+                  <Paragraph type="secondary" style={{ margin: 0 }}>暂无可同步记忆。</Paragraph>
+                )}
+              </Spin>
+              {filteredMemorySyncItems.length > shownMemorySyncItems.length && (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  仅展示当前筛选的最近 {shownMemorySyncItems.length} 条；“同步当前筛选”会处理全部匹配项。
+                </Text>
+              )}
+              <Modal
+                title="确认同步记忆到知识库"
+                open={memorySyncPreviewVisible}
+                onCancel={() => setMemorySyncPreviewVisible(false)}
+                onOk={() => syncMemoryToObsidian(pendingMemorySyncKeys, includeSyncedMemory)}
+                confirmLoading={syncingMemory}
+                okText="确认同步"
+                cancelText="取消"
+              >
+                <Paragraph type="secondary">
+                  将同步 {pendingMemorySyncKeys.length} 条记忆到 Obsidian Vault 的 灵枢/Memory/Facts 目录。
+                </Paragraph>
+                <List
+                  size="small"
+                  dataSource={pendingMemorySyncKeys.slice(0, 20)}
+                  renderItem={key => <List.Item><Text code>{key}</Text></List.Item>}
+                />
+                {pendingMemorySyncKeys.length > 20 && (
+                  <Text type="secondary">还有 {pendingMemorySyncKeys.length - 20} 条未展示。</Text>
+                )}
+              </Modal>
+            </Space>
+          </Card>
+          <Card size="small" title="对话归档到知识库">
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Paragraph type="secondary" style={{ margin: 0 }}>
+                新对话在保存或更新时会同步写入本地 JSON 和 Obsidian Markdown，不按固定时间延迟归档；也可以手动把历史会话补归档到 灵枢/Conversations/AI对话。旧的 Codex/对话存档 会继续兼容读取。
+              </Paragraph>
+              <Space wrap>
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={archivingConversations}
+                  onClick={archiveConversationsToObsidian}
+                >
+                  归档全部历史对话
+                </Button>
+                {conversationArchiveResult?.index?.relativePath && (
+                  <Tag color="green">{conversationArchiveResult.index.relativePath}</Tag>
+                )}
+              </Space>
+              {conversationArchiveResult && (
+                <Space wrap>
+                  <Tag color="blue">已归档 {conversationArchiveResult.archived?.length || 0}</Tag>
+                  <Tag color="default">跳过 {conversationArchiveResult.skipped?.length || 0}</Tag>
+                  <Tag color={(conversationArchiveResult.failed?.length || 0) > 0 ? 'red' : 'green'}>
+                    失败 {conversationArchiveResult.failed?.length || 0}
+                  </Tag>
+                </Space>
+              )}
+            </Space>
+          </Card>
         </Space>
       </Card>
       <Card size="small" style={{ marginBottom: 16 }}>
@@ -562,8 +1024,166 @@ const Settings: React.FC = () => {
     </div>
   )
 
+  const isolationPolicy = isolationStatus?.policy || {}
+  const isolationContent = (
+    <div>
+      <Alert
+        type={isolationStatus?.summary?.isolated ? 'success' : 'warning'}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message={isolationStatus?.summary?.isolated ? '本地空间隔离已启用' : '隔离策略需要确认'}
+        description="这里控制灵枢本地运行时、工具执行、Vault 写入和上传目录的权限边界。关闭某项写入权限后，对应同步/归档/API 会被策略拦截。"
+      />
+      <Card size="small" title="空间标识" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Input
+              addonBefore="Space ID"
+              value={isolationPolicy.spaceId || 'local'}
+              onChange={event => updateIsolationPolicy({ spaceId: event.target.value })}
+              style={{ width: 260 }}
+            />
+            <Input
+              addonBefore="名称"
+              value={isolationPolicy.spaceName || '本地个人空间'}
+              onChange={event => updateIsolationPolicy({ spaceName: event.target.value })}
+              style={{ width: 320 }}
+            />
+            <Select
+              value={isolationPolicy.mode || 'local-only'}
+              onChange={value => updateIsolationPolicy({ mode: value })}
+              style={{ width: 160 }}
+              options={[
+                { label: '本地优先', value: 'local-only' },
+                { label: '团队预留', value: 'team-ready' }
+              ]}
+            />
+          </Space>
+          <Text type="secondary">
+            当前基础版仅启用本地空间，后续接入团队/多空间时会用 Space ID 做数据隔离维度。
+          </Text>
+        </Space>
+      </Card>
+      <Card size="small" title="权限开关" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.enforceToolWorkspaceBoundary !== false}
+              onChange={checked => updateIsolationPolicy({ enforceToolWorkspaceBoundary: checked })}
+            />
+            <Text>工具命令只能引用受控根目录内的绝对路径</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowVaultWrite !== false}
+              onChange={checked => updateIsolationPolicy({ allowVaultWrite: checked })}
+            />
+            <Text>允许写入 Markdown Vault</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowMemoryWrite !== false}
+              onChange={checked => updateIsolationPolicy({ allowMemoryWrite: checked })}
+            />
+            <Text>允许同步记忆到 Vault</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowConversationArchive !== false}
+              onChange={checked => updateIsolationPolicy({ allowConversationArchive: checked })}
+            />
+            <Text>允许归档 AI 对话到 Vault</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowUploads !== false}
+              onChange={checked => updateIsolationPolicy({ allowUploads: checked })}
+            />
+            <Text>允许上传目录写入</Text>
+          </Space>
+        </Space>
+      </Card>
+      <Card size="small" title="受控根目录" style={{ marginBottom: 16 }}>
+        <List
+          size="small"
+          dataSource={isolationStatus?.roots || []}
+          locale={{ emptyText: '暂无隔离目录状态' }}
+          renderItem={(root: any) => (
+            <List.Item>
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space wrap>
+                  <Tag color={root.exists && root.directory ? 'success' : 'warning'}>
+                    {root.exists && root.directory ? '可用' : '待检查'}
+                  </Tag>
+                  <Tag color={root.writable ? 'blue' : 'default'}>
+                    {root.writable ? '可写' : '只读/禁写'}
+                  </Tag>
+                  <Text strong>{root.label}</Text>
+                  <Text type="secondary">{root.source}</Text>
+                </Space>
+                <Text code ellipsis={{ tooltip: root.path }}>{root.path}</Text>
+              </Space>
+            </List.Item>
+          )}
+        />
+      </Card>
+      <Card size="small" title="额外受控目录" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+          <Input.TextArea
+            rows={3}
+            value={(isolationPolicy.allowedExtraRoots || []).join('\n')}
+            onChange={event => updateIsolationPolicy({
+              allowedExtraRoots: event.target.value.split('\n').map(item => item.trim()).filter(Boolean)
+            })}
+            placeholder="一行一个目录，例如 ~/Projects/lingshu-shared"
+            style={{ fontFamily: 'monospace' }}
+          />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            需要允许工具读取/写入其它本地项目目录时，把目录加入这里；保存后会进入工具路径边界检查。
+          </Text>
+        </Space>
+      </Card>
+      <Space>
+        <Button type="primary" icon={<SaveOutlined />} loading={savingIsolation} onClick={saveIsolationPolicy}>
+          保存隔离策略
+        </Button>
+        <Button icon={<SyncOutlined />} onClick={loadIsolationStatus}>
+          刷新状态
+        </Button>
+      </Space>
+    </div>
+  )
+
   const shortcutsContent = (
     <div>
+      <Alert
+        type={desktopCapabilities?.isElectron ? 'success' : 'info'}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message={desktopCapabilities?.isElectron ? '桌面快捷键已启用' : '当前在浏览器环境中，桌面级快捷键不可用'}
+        description={desktopCapabilities?.screenshotDir ? `截图会保存到：${desktopCapabilities.screenshotDir}` : undefined}
+      />
+      {desktopCapabilities?.shortcuts && (
+        <Card size="small" title="桌面全局快捷键" style={{ marginBottom: 16 }}>
+          <List
+            size="small"
+            dataSource={[
+              { key: desktopCapabilities.shortcuts.focus, action: '唤起灵枢主窗口' },
+              { key: desktopCapabilities.shortcuts.screenshotAsk, action: '截取主屏幕并插入 AI 对话输入框' },
+              { key: desktopCapabilities.shortcuts.newChatWindow, action: '新开一个 AI 对话窗口' },
+            ]}
+            renderItem={item => (
+              <List.Item>
+                <Space>
+                  <Tag color="green">{item.key}</Tag>
+                  <span>{item.action}</span>
+                </Space>
+              </List.Item>
+            )}
+          />
+        </Card>
+      )}
+      <Card size="small" title="应用内快捷键">
       <List
         dataSource={[
           { key: 'Cmd + K', action: '搜索 / 命令面板' },
@@ -583,6 +1203,158 @@ const Settings: React.FC = () => {
           </List.Item>
         )}
       />
+      </Card>
+    </div>
+  )
+
+  const appearanceContent = (
+    <div>
+      <Space direction="vertical" size="middle" style={{ width: '100%', maxWidth: 820 }}>
+        <Alert
+          type="info"
+          showIcon
+          message="全局背景会应用到整个应用外壳"
+          description="建议使用浅色或低对比图片，并把透明度控制在 10% 到 25%，避免影响文字和按钮可读性。"
+        />
+        <Card size="small" title="自定义背景">
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <div
+              style={{
+                height: 180,
+                borderRadius: 8,
+                border: '1px solid #e5e7eb',
+                backgroundColor: '#f8fafc',
+                backgroundImage: backgroundSettings.url ? `url("${backgroundSettings.url}")` : undefined,
+                backgroundSize: backgroundSettings.fit,
+                backgroundPosition: backgroundSettings.position,
+                backgroundRepeat: backgroundSettings.repeat,
+                opacity: backgroundSettings.url ? Math.max(0.25, backgroundSettings.opacity) : 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                overflow: 'hidden'
+              }}
+            >
+              {!backgroundSettings.url && (
+                <Space direction="vertical" align="center">
+                  <PictureOutlined style={{ fontSize: 36, color: '#94a3b8' }} />
+                  <Text type="secondary">尚未上传背景图片</Text>
+                </Space>
+              )}
+            </div>
+            <Space wrap>
+              <Upload
+                showUploadList={false}
+                accept="image/*"
+                beforeUpload={(file) => {
+                  handleBackgroundUpload(file)
+                  return false
+                }}
+              >
+                <Button icon={<UploadOutlined />} loading={uploadingBackground}>
+                  上传图片
+                </Button>
+              </Upload>
+              <Button
+                icon={<DeleteOutlined />}
+                disabled={!backgroundSettings.url}
+                onClick={() => {
+                  const nextBackground = { ...defaultBackgroundSettings }
+                  updateBackgroundDraft(nextBackground)
+                  saveAppearanceSettings(nextBackground)
+                }}
+              >
+                清除背景
+              </Button>
+              <Button
+                disabled={!backgroundSettings.url}
+                onClick={() => {
+                  updateBackgroundDraft({
+                    fit: 'cover',
+                    position: 'center',
+                    repeat: 'no-repeat',
+                    opacity: 0.82
+                  })
+                }}
+              >
+                推荐适配
+              </Button>
+              <Switch
+                checked={!!backgroundSettings.enabled}
+                disabled={!backgroundSettings.url}
+                checkedChildren="启用"
+                unCheckedChildren="关闭"
+                onChange={(checked) => updateBackgroundDraft({ enabled: checked })}
+              />
+            </Space>
+            <Form layout="vertical">
+              <Form.Item label={<Text strong>图片适配</Text>}>
+                <Select
+                  value={backgroundSettings.fit}
+                  style={{ maxWidth: 260 }}
+                  onChange={(value) => updateBackgroundDraft({ fit: value })}
+                  options={[
+                    { value: 'cover', label: '自适应填充' },
+                    { value: 'contain', label: '完整显示' },
+                    { value: '100% 100%', label: '拉伸铺满（不推荐）' },
+                    { value: 'auto', label: '原始尺寸' }
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label={<Text strong>对齐位置</Text>}>
+                <Select
+                  value={backgroundSettings.position}
+                  style={{ maxWidth: 260 }}
+                  onChange={(value) => updateBackgroundDraft({ position: value })}
+                  options={[
+                    { value: 'center', label: '居中' },
+                    { value: 'top', label: '顶部' },
+                    { value: 'bottom', label: '底部' },
+                    { value: 'left', label: '左侧' },
+                    { value: 'right', label: '右侧' }
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label={<Text strong>重复方式</Text>}>
+                <Select
+                  value={backgroundSettings.repeat}
+                  style={{ maxWidth: 260 }}
+                  onChange={(value) => updateBackgroundDraft({ repeat: value })}
+                  options={[
+                    { value: 'no-repeat', label: '不重复' },
+                    { value: 'repeat', label: '平铺' },
+                    { value: 'repeat-x', label: '横向平铺' },
+                    { value: 'repeat-y', label: '纵向平铺' }
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label={<Text strong>壁纸强度</Text>}>
+                <Slider
+                  min={0.2}
+                  max={1}
+                  step={0.01}
+                  value={backgroundSettings.opacity}
+                  onChange={(value) => updateBackgroundDraft({ opacity: value })}
+                  tooltip={{ formatter: value => `${Math.round((value || 0) * 100)}%` }}
+                />
+              </Form.Item>
+            </Form>
+            <Space>
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={saving}
+                onClick={() => saveAppearanceSettings()}
+              >
+                保存外观
+              </Button>
+              <Text type="secondary">
+                图片会保存到本机上传目录，换电脑后需要重新上传或同步该文件。
+              </Text>
+            </Space>
+          </Space>
+        </Card>
+      </Space>
     </div>
   )
 
@@ -593,10 +1365,54 @@ const Settings: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <RobotOutlined style={{ fontSize: 48, color: '#1890ff' }} />
             <div>
-              <Title level={3} style={{ margin: 0 }}>Lingshu</Title>
-              <Tag color="blue">v1.0.0</Tag>
+              <Title level={3} style={{ margin: 0 }}>灵枢</Title>
+              <Tag color="blue">v{updateState?.currentVersion || packageJson.version}</Tag>
             </div>
           </div>
+          <Divider />
+          <Space>
+            <Button
+              type="primary"
+              icon={<SyncOutlined />}
+              loading={updateActionLoading || updateState?.status === 'checking'}
+              disabled={updateState?.status === 'downloading'}
+              onClick={handleCheckForUpdates}
+            >
+              检查更新
+            </Button>
+            {updateState?.status === 'available' && (
+              <Button loading={updateActionLoading} onClick={handleDownloadUpdate}>下载 v{updateState.availableVersion}</Button>
+            )}
+            {updateState?.status === 'downloaded' && (
+              <Button type="primary" loading={updateActionLoading} onClick={handleInstallUpdate}>重启并安装</Button>
+            )}
+            <Button
+              icon={<GithubOutlined />}
+              onClick={() => openExternal('https://github.com/scene1/Lingshu')}
+            >
+              GitHub
+            </Button>
+            <Button
+              icon={<BugOutlined />}
+              onClick={() => openExternal('https://github.com/scene1/Lingshu/issues')}
+            >
+              问题反馈
+            </Button>
+          </Space>
+          <Alert
+            type={updateState?.status === 'error' ? 'error' : updateState?.status === 'available' || updateState?.status === 'downloaded' ? 'info' : 'success'}
+            showIcon
+            message={updateState?.message || '桌面版支持从 GitHub Releases 检查更新'}
+            description={updateState?.status === 'downloading' ? `下载进度 ${Math.round(updateState.progress || 0)}%` : undefined}
+          />
+          {updateState?.status === 'error' && (
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={() => openExternal(updateState.repositoryUrl || 'https://github.com/scene1/Lingshu/releases')}
+            >
+              打开发布下载页
+            </Button>
+          )}
           <Divider />
           <div>
             <Text strong>技术栈</Text>
@@ -604,7 +1420,7 @@ const Settings: React.FC = () => {
               { label: 'React', value: '18.x' },
               { label: 'Ant Design', value: '5.x' },
               { label: 'Express', value: '4.x' },
-              { label: 'Vite', value: '5.x' },
+              { label: 'Vite', value: '8.x' },
               { label: 'TypeScript', value: '5.x' },
             ]} renderItem={item => (
               <List.Item style={{ padding: '4px 0' }}>
@@ -626,8 +1442,10 @@ const Settings: React.FC = () => {
 
   const tabItems = [
     { key: 'general', label: '通用设置', icon: <SettingOutlined />, children: generalFormContent },
+    { key: 'appearance', label: '外观背景', icon: <PictureOutlined />, children: appearanceContent },
     { key: 'models', label: '模型配置', icon: <RobotOutlined />, children: modelConfigContent },
     { key: 'data', label: '数据与存储', icon: <DatabaseOutlined />, children: dataStorageContent },
+    { key: 'isolation', label: '权限与隔离', icon: <KeyOutlined />, children: isolationContent },
     { key: 'shortcuts', label: '快捷键', icon: <ThunderboltOutlined />, children: shortcutsContent },
     { key: 'about', label: '关于', icon: <InfoCircleOutlined />, children: aboutContent },
   ]
@@ -635,7 +1453,7 @@ const Settings: React.FC = () => {
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
 
   return (
-    <Layout style={{ minHeight: '100%', background: '#f5f5f5' }}>
+    <Layout style={{ minHeight: '100%', background: 'transparent' }}>
       <Content style={{ padding: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24 }}>
           <SettingOutlined style={{ fontSize: 24, color: '#1890ff', marginRight: 12 }} />

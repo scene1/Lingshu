@@ -36,7 +36,9 @@ export interface ProviderConfig {
   baseUrl: string
   models: { value: string; label: string; desc: string }[]
   docUrl: string
+  keyUrl: string
   keyPlaceholder: string
+  mode?: 'api-key' | 'local-cli'
 }
 
 // 主流模型提供商配置
@@ -52,6 +54,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'step-3.5-flash', label: 'Step-3.5 Flash', desc: '轻量极速' },
     ],
     docUrl: 'https://platform.stepfun.com/',
+    keyUrl: 'https://platform.stepfun.com/account/accesskey',
     keyPlaceholder: 'your-api-key'
   },
   zhipu: {
@@ -65,6 +68,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'glm-4v', label: 'GLM-4V', desc: '多模态，支持图像' },
     ],
     docUrl: 'https://open.bigmodel.cn/',
+    keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
     keyPlaceholder: 'your-api-key'
   },
   openai: {
@@ -81,6 +85,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'gpt-4o-mini', label: 'GPT-4o Mini', desc: '经济快速' },
     ],
     docUrl: 'https://platform.openai.com/',
+    keyUrl: 'https://platform.openai.com/api-keys',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   anthropic: {
@@ -100,7 +105,24 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1', desc: '上一代旗舰' },
     ],
     docUrl: 'https://console.anthropic.com/',
+    keyUrl: 'https://console.anthropic.com/settings/keys',
     keyPlaceholder: 'sk-ant-xxxxxxxx'
+  },
+  'claude-cli': {
+    id: 'claude-cli',
+    name: 'Claude CLI (本地命令行)',
+    icon: '⚡',
+    baseUrl: 'local://claude-cli',
+    models: [
+      { value: 'sonnet', label: 'Sonnet [claude-sonnet-5]', desc: '平衡性能与速度，日常首选' },
+      { value: 'opus', label: 'Opus [claude-opus-4-8]', desc: '最强推理能力，复杂任务推荐' },
+      { value: 'haiku', label: 'Haiku [claude-haiku-4-5]', desc: '极速响应，轻量任务' },
+      { value: 'fable', label: 'Fable [claude-fable-5]', desc: '旗舰模型别名' },
+    ],
+    docUrl: 'https://docs.anthropic.com/',
+    keyUrl: 'https://docs.anthropic.com/',
+    keyPlaceholder: '无需填写，由 claude CLI 自身管理认证',
+    mode: 'local-cli'
   },
   doubao: {
     id: 'doubao',
@@ -113,6 +135,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'doubao-vision', label: '豆包 Vision', desc: '多模态版本' },
     ],
     docUrl: 'https://console.volcengine.com/',
+    keyUrl: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
     keyPlaceholder: 'your-api-key'
   },
   qwen: {
@@ -126,6 +149,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'qwen-turbo', label: 'Qwen Turbo', desc: '极速响应' },
     ],
     docUrl: 'https://dashscope.aliyun.com/',
+    keyUrl: 'https://dashscope.console.aliyun.com/apiKey',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   deepseek: {
@@ -140,6 +164,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'deepseek-reasoner', label: 'DeepSeek Reasoner (V3.2)', desc: '推理增强，即将废弃' },
     ],
     docUrl: 'https://platform.deepseek.com/',
+    keyUrl: 'https://platform.deepseek.com/api_keys',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   moonshot: {
@@ -153,6 +178,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'moonshot-v1-128k', label: 'Moonshot 128K', desc: '长上下文' },
     ],
     docUrl: 'https://platform.moonshot.cn/',
+    keyUrl: 'https://platform.moonshot.cn/console/api-keys',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   xiaomi: {
@@ -167,6 +193,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'mimo-v2-omni', label: 'MiMo-V2 Omni', desc: '多模态（文本+图像）' },
     ],
     docUrl: 'https://platform.xiaomimimo.com/',
+    keyUrl: 'https://platform.xiaomimimo.com/',
     keyPlaceholder: 'tp-xxxxxxxx'
   },
 }
@@ -177,6 +204,7 @@ const ModelConfig: React.FC = () => {
   const [configs, setConfigs] = useState<Record<string, any>>({})
   const [loading, setLoading] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [claudeCliStatus, setClaudeCliStatus] = useState<{ available: boolean; path?: string; candidates?: string[] } | null>(null)
 
   // 加载配置
   useEffect(() => {
@@ -186,19 +214,21 @@ const ModelConfig: React.FC = () => {
   // 切换提供商时加载对应配置
   useEffect(() => {
     const config = configs[currentProvider]
+    const provider = PROVIDERS[currentProvider]
     if (config) {
       form.setFieldsValue({
         apiKey: config.apiKey,
-        baseUrl: config.baseUrl || PROVIDERS[currentProvider].baseUrl,
+        baseUrl: config.baseUrl || provider.baseUrl,
         model: config.model
       })
     } else {
       form.setFieldsValue({
         apiKey: '',
-        baseUrl: PROVIDERS[currentProvider].baseUrl,
-        model: PROVIDERS[currentProvider].models[0]?.value
+        baseUrl: provider.baseUrl,
+        model: provider.models[0]?.value
       })
     }
+    if (provider.mode === 'local-cli') loadClaudeCliStatus()
   }, [currentProvider, configs])
 
   const loadConfigs = async () => {
@@ -210,6 +240,18 @@ const ModelConfig: React.FC = () => {
       }
     } catch (error) {
       console.error('加载配置失败:', error)
+    }
+  }
+
+  const loadClaudeCliStatus = async () => {
+    try {
+      const response = await fetch('/api/claude-cli/status')
+      if (response.ok) {
+        setClaudeCliStatus(await response.json())
+      }
+    } catch (error) {
+      console.error('加载 Claude CLI 状态失败:', error)
+      setClaudeCliStatus({ available: false })
     }
   }
 
@@ -230,7 +272,7 @@ const ModelConfig: React.FC = () => {
     
     const result = await response.json()
     if (!result.success) {
-      throw new Error(result.error || `HTTP ${response.status}`)
+      throw new Error(result.error || result.message || `HTTP ${response.status}`)
     }
     
     return true
@@ -239,6 +281,7 @@ const ModelConfig: React.FC = () => {
   // 保存配置
   const handleSave = async () => {
     const values = await form.validateFields()
+    const provider = PROVIDERS[currentProvider]
     setLoading(true)
     
     try {
@@ -248,11 +291,13 @@ const ModelConfig: React.FC = () => {
       
       // 更新 providers
       config.providers = config.providers || {}
-      config.providers[currentProvider] = {
-        apiKey: values.apiKey,
-        baseUrl: values.baseUrl,
-        model: values.model
-      }
+      config.providers[currentProvider] = provider.mode === 'local-cli'
+        ? { apiKey: '', baseUrl: provider.baseUrl, model: values.model, mode: 'local-cli' }
+        : {
+            apiKey: values.apiKey,
+            baseUrl: values.baseUrl,
+            model: values.model
+          }
       
       // 保存
       const saveResponse = await fetch('/api/config', {
@@ -306,19 +351,17 @@ const ModelConfig: React.FC = () => {
   }))
 
   const currentConfig = PROVIDERS[currentProvider]
+  const isLocalCliProvider = currentConfig.mode === 'local-cli'
 
   return (
-    <Layout style={{ minHeight: '100vh', background: '#f5f5f5' }}>
+    <Layout className="model-config-page" style={{ minHeight: '100vh' }}>
       {/* 左侧提供商列表 */}
       <Sider 
+        className="model-config-sider"
         width={280} 
         theme="light"
-        style={{ 
-          borderRight: '1px solid #e8e8e8',
-          background: '#fff'
-        }}
       >
-        <div style={{ padding: '16px 24px', borderBottom: '1px solid #e8e8e8' }}>
+        <div className="model-config-provider-head">
           <Title level={4} style={{ margin: 0 }}>
             <SettingOutlined style={{ marginRight: 8 }} />
             模型配置
@@ -334,13 +377,20 @@ const ModelConfig: React.FC = () => {
       </Sider>
 
       {/* 右侧配置表单 */}
-      <Content style={{ padding: 24 }}>
+      <Content className="model-config-content">
         <Card
+          className="model-config-card"
           title={
             <Space>
               <span style={{ fontSize: 24 }}>{currentConfig.icon}</span>
               <Title level={4} style={{ margin: 0 }}>{currentConfig.name}</Title>
-              {configs[currentProvider]?.apiKey && (
+              {isLocalCliProvider && claudeCliStatus?.available && (
+                <Tag color="success" icon={<CheckCircleOutlined />}>CLI 已安装</Tag>
+              )}
+              {isLocalCliProvider && claudeCliStatus && !claudeCliStatus.available && (
+                <Tag color="error">CLI 未安装</Tag>
+              )}
+              {!isLocalCliProvider && configs[currentProvider]?.apiKey && (
                 <Tag color="success" icon={<CheckCircleOutlined />}>已配置</Tag>
               )}
             </Space>
@@ -349,22 +399,35 @@ const ModelConfig: React.FC = () => {
             <Button 
               type="link" 
               icon={<LinkOutlined />}
-              href={currentConfig.docUrl}
+              href={currentConfig.keyUrl}
               target="_blank"
             >
-              获取 API Key
+              {isLocalCliProvider ? '查看文档' : '获取 API Key'}
             </Button>
           }
           style={{ maxWidth: 800 }}
         >
           {/* 配置说明 */}
-          <Alert
-            message="配置说明"
-            description={`在 ${currentConfig.docUrl} 注册账号并创建 API Key，填入下方配置。支持 ${currentConfig.models.length} 款模型。`}
-            type="info"
-            showIcon
-            style={{ marginBottom: 24 }}
-          />
+          {isLocalCliProvider ? (
+            <Alert
+              message={claudeCliStatus?.available ? 'Claude CLI 可用' : 'Claude CLI 未检测到'}
+              description={claudeCliStatus?.available
+                ? `已检测到本地 CLI：${claudeCliStatus.path}。灵枢会通过 claude -p 复用 CLI 自身认证，不需要 API Key。`
+                : '请先安装并登录 claude CLI，例如 npm install -g @anthropic-ai/claude-code，然后在终端运行 claude 完成认证。'}
+              type={claudeCliStatus?.available ? 'success' : 'warning'}
+              showIcon
+              action={<Button size="small" onClick={loadClaudeCliStatus}>重新检测</Button>}
+              style={{ marginBottom: 24 }}
+            />
+          ) : (
+            <Alert
+              message="配置说明"
+              description={`在 ${currentConfig.docUrl} 注册账号并创建 API Key，填入下方配置。支持 ${currentConfig.models.length} 款模型。`}
+              type="info"
+              showIcon
+              style={{ marginBottom: 24 }}
+            />
+          )}
 
           <Form
             form={form}
@@ -374,31 +437,35 @@ const ModelConfig: React.FC = () => {
               model: currentConfig.models[0]?.value
             }}
           >
-            {/* API Key */}
-            <Form.Item
-              name="apiKey"
-              label={<Text strong>API Key</Text>}
-              rules={[{ required: true, message: '请输入 API Key' }]}
-            >
-              <Input.Password
-                placeholder={currentConfig.keyPlaceholder}
-                prefix={<KeyOutlined />}
-                size="large"
-              />
-            </Form.Item>
+            {!isLocalCliProvider && (
+              <>
+                {/* API Key */}
+                <Form.Item
+                  name="apiKey"
+                  label={<Text strong>API Key</Text>}
+                  rules={[{ required: true, message: '请输入 API Key' }]}
+                >
+                  <Input.Password
+                    placeholder={currentConfig.keyPlaceholder}
+                    prefix={<KeyOutlined />}
+                    size="large"
+                  />
+                </Form.Item>
 
-            {/* Base URL */}
-            <Form.Item
-              name="baseUrl"
-              label={<Text strong>Base URL</Text>}
-              rules={[{ required: true, message: '请输入 Base URL' }]}
-            >
-              <Input
-                placeholder={currentConfig.baseUrl}
-                prefix={<GlobalOutlined />}
-                size="large"
-              />
-            </Form.Item>
+                {/* Base URL */}
+                <Form.Item
+                  name="baseUrl"
+                  label={<Text strong>Base URL</Text>}
+                  rules={[{ required: true, message: '请输入 Base URL' }]}
+                >
+                  <Input
+                    placeholder={currentConfig.baseUrl}
+                    prefix={<GlobalOutlined />}
+                    size="large"
+                  />
+                </Form.Item>
+              </>
+            )}
 
             {/* 默认模型 */}
             <Form.Item

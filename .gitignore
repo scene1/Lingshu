@@ -1,7 +1,14 @@
 node_modules/
 dist/
 dist-electron/
+.playwright-cli/
+output/
+evals/conversation-runtime/latest-report.json
 backend.log
 frontend.log
+server.log
+server-bundle.cjs
+electron-dist/
+vite.config.ts.timestamp-*.mjs
 .DS_Store
 *.local

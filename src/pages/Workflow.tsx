@@ -1,15 +1,17 @@
 import React, { useState, useEffect } from 'react'
 import {
-  Card, Table, Button, Space, Tag, Modal, Form, Input, Select,
-  message, Popconfirm, Row, Col
+  Alert, Card, Table, Button, Space, Tag, Modal, Form, Input, Select,
+  message, Popconfirm, Row, Col, Switch, Drawer, Timeline, Typography, Descriptions
 } from 'antd'
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined,
-  ReloadOutlined, ApartmentOutlined, BranchesOutlined
+  ReloadOutlined, ApartmentOutlined, BranchesOutlined, PauseCircleOutlined,
+  StopOutlined, ForwardOutlined, RedoOutlined
 } from '@ant-design/icons'
 
 const { Option } = Select
 const { TextArea } = Input
+const { Text, Paragraph } = Typography
 
 interface WorkflowNode {
   id: string
@@ -38,6 +40,36 @@ interface Workflow {
   lastRunAt?: string
 }
 
+interface WorkflowRunNode {
+  nodeId: string
+  nodeName: string
+  type: WorkflowNode['type']
+  status: 'pending' | 'running' | 'completed' | 'error' | string
+  output?: string
+  input?: Record<string, any>
+  startedAt?: string
+  finishedAt?: string
+  durationMs?: number
+  timestamp?: string
+}
+
+interface WorkflowRunResult {
+  id: string
+  workflowId: string
+  workflowName: string
+  status: 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'canceled'
+  currentNodeId?: string
+  results: WorkflowRunNode[]
+  error?: string
+  startedAt?: string
+  finishedAt?: string
+  updatedAt?: string
+  parentRunId?: string
+  retryNodeId?: string
+  startNodeId?: string
+  skippedNodeIds?: string[]
+}
+
 const NODE_TYPE_OPTIONS = [
   { value: 'agent', label: 'Agent 节点', icon: '🤖' },
   { value: 'skill', label: 'Skill 节点', icon: '⚡' },
@@ -55,12 +87,36 @@ const Workflow: React.FC = () => {
   const [nodeModalVisible, setNodeModalVisible] = useState(false)
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null)
   const [currentNodes, setCurrentNodes] = useState<WorkflowNode[]>([])
+  const [runningWorkflowId, setRunningWorkflowId] = useState('')
+  const [runResults, setRunResults] = useState<Record<string, WorkflowRunResult>>({})
+  const [runDrawerVisible, setRunDrawerVisible] = useState(false)
+  const [selectedRunWorkflow, setSelectedRunWorkflow] = useState<Workflow | null>(null)
   const [form] = Form.useForm()
   const [nodeForm] = Form.useForm()
 
   useEffect(() => {
     loadWorkflows()
   }, [])
+
+  useEffect(() => {
+    const activeEntries = Object.entries(runResults).filter(([, run]) => ['queued', 'running', 'paused'].includes(run.status))
+    if (activeEntries.length === 0) return
+    const timer = window.setInterval(async () => {
+      await Promise.all(activeEntries.map(async ([workflowId, run]) => {
+        try {
+          const response = await fetch(`/api/workflow-runs/${run.id}`)
+          const data = await response.json()
+          if (!response.ok || !data.run) return
+          setRunResults(prev => ({ ...prev, [workflowId]: data.run }))
+          if (['completed', 'failed', 'canceled'].includes(data.run.status)) {
+            setRunningWorkflowId(current => current === workflowId ? '' : current)
+            loadWorkflows()
+          }
+        } catch (_) {}
+      }))
+    }, 700)
+    return () => window.clearInterval(timer)
+  }, [runResults])
 
   const loadWorkflows = async () => {
     setLoading(true)
@@ -81,7 +137,7 @@ const Workflow: React.FC = () => {
   const getDefaultWorkflows = (): Workflow[] => [
     {
       id: 'wf-daily-report',
-      name: '每日报告生成',
+      name: '示例：每日报告生成',
       description: '每天定时采集数据 → Agent 分析 → 生成报告 → 推送飞书',
       status: 'draft',
       mode: 'sequential',
@@ -103,7 +159,7 @@ const Workflow: React.FC = () => {
     },
     {
       id: 'wf-code-review',
-      name: '代码审查流水线',
+      name: '示例：代码审查流水线',
       description: '提交代码 → 并行审查（语法+安全+风格）→ 汇总结果',
       status: 'draft',
       mode: 'parallel',
@@ -129,7 +185,7 @@ const Workflow: React.FC = () => {
     },
     {
       id: 'wf-news-digest',
-      name: '新闻智能摘要',
+      name: '示例：新闻智能摘要',
       description: '抓取 RSS → 条件过滤 → 并行摘要 → 分类整理 → 推送',
       status: 'draft',
       mode: 'conditional',
@@ -196,7 +252,29 @@ const Workflow: React.FC = () => {
       const url = editingWorkflow ? `/api/workflows/${workflow.id}` : '/api/workflows'
       const method = editingWorkflow ? 'PUT' : 'POST'
       await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(workflow) })
-      message.success('保存成功')
+
+      // P2: 如果启用了定时触发，注册到自动化引擎
+      if (values.enableCron && values.cronExpression) {
+        try {
+          await fetch('/api/automations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: `定时触发: ${workflow.name}`,
+              description: `工作流 ${workflow.name} 的定时触发`,
+              cronExpression: values.cronExpression,
+              actionType: 'workflow',
+              workflowId: workflow.id,
+              enabled: true,
+            }),
+          })
+          message.success('保存成功，已注册定时触发')
+        } catch {
+          message.warning('保存成功，但定时触发注册失败')
+        }
+      } else {
+        message.success('保存成功')
+      }
       setModalVisible(false)
       loadWorkflows()
     } catch {
@@ -210,12 +288,74 @@ const Workflow: React.FC = () => {
   }
 
   const handleRun = async (id: string) => {
+    const workflow = workflows.find(item => item.id === id) || null
+    setRunningWorkflowId(id)
     try {
-      await fetch(`/api/workflows/${id}/run`, { method: 'POST' })
-      message.success('工作流已启动')
-      loadWorkflows()
-    } catch {
-      message.success('已提交执行')
+      const response = await fetch(`/api/workflows/${id}/runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.run) throw new Error(data?.message || data?.error || '运行失败')
+      setRunResults(prev => ({ ...prev, [id]: data.run }))
+      setSelectedRunWorkflow(workflow)
+      setRunDrawerVisible(true)
+      message.success('工作流已进入运行队列')
+    } catch (error: any) {
+      message.error(error?.message || '工作流运行失败')
+      setRunningWorkflowId('')
+    }
+  }
+
+  const controlRun = async (action: 'pause' | 'resume' | 'cancel' | 'skip', nodeId?: string) => {
+    if (!selectedRunWorkflow) return
+    const run = runResults[selectedRunWorkflow.id]
+    if (!run) return
+    try {
+      const response = await fetch(`/api/workflow-runs/${run.id}/actions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, nodeId }),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.run) throw new Error(data?.message || data?.error || '操作失败')
+      setRunResults(prev => ({ ...prev, [selectedRunWorkflow.id]: data.run }))
+      message.success({ pause: '已暂停', resume: '已恢复', cancel: '已取消', skip: '已请求跳过节点' }[action])
+    } catch (error: any) {
+      message.error(error.message || '运行操作失败')
+    }
+  }
+
+  const retryNode = async (nodeId: string) => {
+    if (!selectedRunWorkflow) return
+    const run = runResults[selectedRunWorkflow.id]
+    if (!run) return
+    try {
+      const response = await fetch(`/api/workflow-runs/${run.id}/nodes/${nodeId}/retry`, { method: 'POST' })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.run) throw new Error(data?.message || data?.error || '节点重试失败')
+      setRunResults(prev => ({ ...prev, [selectedRunWorkflow.id]: data.run }))
+      setRunningWorkflowId(selectedRunWorkflow.id)
+      message.success('节点已重新进入运行队列')
+    } catch (error: any) {
+      message.error(error.message || '节点重试失败')
+    }
+  }
+
+  const resumeFromNode = async (nodeId: string) => {
+    if (!selectedRunWorkflow) return
+    try {
+      const response = await fetch(`/api/workflows/${selectedRunWorkflow.id}/runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startNodeId: nodeId }),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.run) throw new Error(data?.message || data?.error || '断点运行失败')
+      setRunResults(prev => ({ ...prev, [selectedRunWorkflow.id]: data.run }))
+      setRunningWorkflowId(selectedRunWorkflow.id)
+      message.success('已从所选节点继续运行')
+    } catch (error: any) {
+      message.error(error.message || '断点运行失败')
     }
   }
 
@@ -258,11 +398,32 @@ const Workflow: React.FC = () => {
     return found?.icon || '📦'
   }
 
+  const getRunStatusColor = (status?: string) => {
+    if (status === 'completed' || status === 'success') return 'green'
+    if (status === 'running') return 'blue'
+    if (status === 'paused') return 'orange'
+    if (status === 'canceled' || status === 'skipped') return 'gray'
+    if (status === 'error' || status === 'failed') return 'red'
+    return 'gray'
+  }
+
+  const formatDuration = (ms?: number) => {
+    if (typeof ms !== 'number') return '-'
+    if (ms < 1000) return `${Math.round(ms)}ms`
+    return `${(ms / 1000).toFixed(2)}s`
+  }
+
+  const openRunDebug = (workflow: Workflow) => {
+    setSelectedRunWorkflow(workflow)
+    setRunDrawerVisible(true)
+  }
+
   const columns = [
     {
       title: '工作流名称',
       dataIndex: 'name',
       key: 'name',
+      width: 300,
       render: (text: string, record: Workflow) => (
         <div>
           <Space>
@@ -303,11 +464,20 @@ const Workflow: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 220,
+      width: 280,
       render: (_: any, record: Workflow) => (
         <Space>
-          <Button type="primary" icon={<PlayCircleOutlined />} size="small" onClick={() => handleRun(record.id)}>
+          <Button
+            type="primary"
+            icon={<PlayCircleOutlined />}
+            size="small"
+            loading={runningWorkflowId === record.id}
+            onClick={() => handleRun(record.id)}
+          >
             运行
+          </Button>
+          <Button size="small" disabled={!runResults[record.id]} onClick={() => openRunDebug(record)}>
+            调试
           </Button>
           <Button icon={<EditOutlined />} size="small" onClick={() => handleEdit(record)}>
             编辑
@@ -320,12 +490,24 @@ const Workflow: React.FC = () => {
     },
   ]
 
+  const selectedRun = selectedRunWorkflow ? runResults[selectedRunWorkflow.id] : null
+  const selectedRunNodes = selectedRun?.results || []
+  const selectedRunActive = !!selectedRun && ['queued', 'running', 'paused'].includes(selectedRun.status)
+
   return (
     <div>
       <h2 style={{ marginBottom: 16 }}>
         <BranchesOutlined style={{ marginRight: 8 }} />
-        工作流配置
+        Workflow 运行控制
       </h2>
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="每次执行都会生成独立 Run ID"
+        description="运行在后台继续，支持暂停、恢复、取消、跳过当前节点、单节点重试和从指定节点继续。关闭调试抽屉不会中断任务。"
+      />
 
       <Card
         extra={
@@ -342,6 +524,7 @@ const Workflow: React.FC = () => {
           dataSource={workflows}
           rowKey="id"
           loading={loading}
+          scroll={{ x: 980 }}
           expandable={{
             expandedRowRender: (record) => (
               <div style={{ padding: '12px 24px', background: '#fafafa' }}>
@@ -350,23 +533,29 @@ const Workflow: React.FC = () => {
                 </div>
                 <Space wrap size={[8, 8]}>
                   {record.nodes.map((node, idx) => (
-                    <React.Fragment key={node.id}>
-                      <Tag
-                        color={
-                          node.type === 'agent' ? 'blue' :
-                          node.type === 'skill' ? 'purple' :
-                          node.type === 'condition' ? 'orange' :
-                          node.type === 'loop' ? 'cyan' :
-                          'default'
-                        }
-                        style={{ padding: '4px 10px', fontSize: 13 }}
-                      >
-                        {getNodeIcon(node.type)} {node.name}
-                      </Tag>
-                      {idx < record.nodes.length - 1 && (
-                        <span style={{ color: '#999', fontSize: 18 }}>→</span>
-                      )}
-                    </React.Fragment>
+                    (() => {
+                      const runNode = runResults[record.id]?.results?.find(item => item.nodeId === node.id)
+                      return (
+                        <React.Fragment key={node.id}>
+                          <Tag
+                            color={runNode ? getRunStatusColor(runNode.status) : (
+                              node.type === 'agent' ? 'blue' :
+                              node.type === 'skill' ? 'purple' :
+                              node.type === 'condition' ? 'orange' :
+                              node.type === 'loop' ? 'cyan' :
+                              'default'
+                            )}
+                            style={{ padding: '4px 10px', fontSize: 13 }}
+                          >
+                            {getNodeIcon(node.type)} {node.name}
+                            {runNode?.durationMs ? ` · ${formatDuration(runNode.durationMs)}` : ''}
+                          </Tag>
+                          {idx < record.nodes.length - 1 && (
+                            <span style={{ color: '#999', fontSize: 18 }}>→</span>
+                          )}
+                        </React.Fragment>
+                      )
+                    })()
                   ))}
                 </Space>
               </div>
@@ -404,6 +593,23 @@ const Workflow: React.FC = () => {
           </Row>
           <Form.Item name="description" label="描述">
             <TextArea rows={2} placeholder="描述工作流的用途" />
+          </Form.Item>
+
+          {/* P2: 定时触发配置 */}
+          <Form.Item name="enableCron" label="定时触发" valuePropName="checked">
+            <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, curr) => prev.enableCron !== curr.enableCron}
+          >
+            {({ getFieldValue }) =>
+              getFieldValue('enableCron') ? (
+                <Form.Item name="cronExpression" label="Cron 表达式" rules={[{ required: true, message: '请输入 Cron 表达式' }]}>
+                  <Input placeholder="例如：0 9 * * *（每天 9 点执行）" style={{ fontFamily: 'monospace' }} />
+                </Form.Item>
+              ) : null
+            }
           </Form.Item>
 
           <div style={{ marginBottom: 16 }}>
@@ -471,6 +677,89 @@ const Workflow: React.FC = () => {
           </Form.Item>
         </Form>
       </Modal>
+
+      <Drawer
+        title="Workflow 节点调试"
+        open={runDrawerVisible}
+        onClose={() => setRunDrawerVisible(false)}
+        width={720}
+      >
+        {selectedRunWorkflow && selectedRun ? (
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <Space wrap>
+              {selectedRun.status === 'running' && <Button icon={<PauseCircleOutlined />} onClick={() => controlRun('pause')}>暂停</Button>}
+              {selectedRun.status === 'paused' && <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => controlRun('resume')}>恢复</Button>}
+              {selectedRunActive && selectedRun.currentNodeId && <Button icon={<ForwardOutlined />} onClick={() => controlRun('skip', selectedRun.currentNodeId)}>跳过当前节点</Button>}
+              {selectedRunActive && <Button danger icon={<StopOutlined />} onClick={() => controlRun('cancel')}>取消运行</Button>}
+            </Space>
+            <Descriptions bordered size="small" column={1}>
+              <Descriptions.Item label="工作流">{selectedRunWorkflow.name}</Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <Tag color={getRunStatusColor(selectedRun.status)}>{selectedRun.status}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="执行模式">{getModeTag(selectedRunWorkflow.mode)}</Descriptions.Item>
+              <Descriptions.Item label="Run ID"><Text code>{selectedRun.id}</Text></Descriptions.Item>
+              <Descriptions.Item label="当前节点">{selectedRun.currentNodeId || '-'}</Descriptions.Item>
+              {selectedRun.error && (
+                <Descriptions.Item label="错误">
+                  <Text type="danger">{selectedRun.error}</Text>
+                </Descriptions.Item>
+              )}
+            </Descriptions>
+
+            <Card size="small" title={`节点时间线（${selectedRunNodes.length}）`}>
+              {selectedRunNodes.length > 0 ? (
+                <Timeline
+                  items={selectedRunNodes.map((node, index) => ({
+                    color: getRunStatusColor(node.status),
+                    children: (
+                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                        <Space wrap>
+                          <Text strong>{index + 1}. {node.nodeName}</Text>
+                          <Tag>{node.type}</Tag>
+                          <Tag color={getRunStatusColor(node.status)}>{node.status}</Tag>
+                          <Text type="secondary">{formatDuration(node.durationMs)}</Text>
+                          {!selectedRunActive && (
+                            <Button type="link" size="small" icon={<RedoOutlined />} onClick={() => retryNode(node.nodeId)}>重试此节点</Button>
+                          )}
+                          {!selectedRunActive && selectedRunWorkflow.mode === 'sequential' && (
+                            <Button type="link" size="small" icon={<PlayCircleOutlined />} onClick={() => resumeFromNode(node.nodeId)}>从这里运行</Button>
+                          )}
+                        </Space>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {node.startedAt || '-'} → {node.finishedAt || node.timestamp || '-'}
+                        </Text>
+                        {node.output && (
+                          <Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}>
+                            {node.output}
+                          </Paragraph>
+                        )}
+                        {node.input && (
+                          <pre style={{
+                            margin: 0,
+                            maxHeight: 160,
+                            overflow: 'auto',
+                            fontSize: 12,
+                            background: '#f7f7f7',
+                            padding: 8,
+                            borderRadius: 6,
+                          }}>
+                            {JSON.stringify(node.input, null, 2)}
+                          </pre>
+                        )}
+                      </Space>
+                    ),
+                  }))}
+                />
+              ) : (
+                <Text type="secondary">暂无节点结果。</Text>
+              )}
+            </Card>
+          </Space>
+        ) : (
+          <Text type="secondary">运行一次工作流后，可在这里查看节点调试信息。</Text>
+        )}
+      </Drawer>
     </div>
   )
 }
