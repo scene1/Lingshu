@@ -17,7 +17,7 @@
     "electron:build:mac": "npm run build && npm run bundle:server && electron-builder --mac",
     "electron:build:win": "npm run build && npm run bundle:server && electron-builder --win",
     "electron:build:linux": "npm run build && npm run bundle:server && electron-builder --linux",
-    "bundle:server": "esbuild server-v2.js --bundle --platform=node --format=cjs --outfile=server-bundle.cjs --define:import.meta.url=__import_meta_url --banner:js='var __import_meta_url=require(\"url\").pathToFileURL(__filename).href;'",
+    "bundle:server": "node scripts/build-server.mjs",
     "test": "node --test server/core/*.test.js evals/conversation-runtime/*.test.js",
     "test:runtime": "node --test server/core/conversation-runtime.test.js",
     "test:security": "node --test server/core/security.test.js",
@@ -56,6 +56,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "electron": "^30.5.1",
     "electron-builder": "^24.13.0",
+    "esbuild": "^0.21.5",
     "typescript": "^5.9.3",
     "vite": "^5.4.21"
   },
