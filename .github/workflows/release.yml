@@ -191,7 +191,7 @@ jobs:
         with:
           name: ${{ steps.meta.outputs.title }}
           tag_name: ${{ github.ref_name }}
-          body_path: deliverables/release-v2.0.1.md
+          body_path: deliverables/release-v2.1.0.md
           files: release-assets/*
           draft: false
           prerelease: false

@@ -23,7 +23,7 @@ interface GitIntegration {
   username?: string
   organization?: string
   token?: string
-  hasToken?: boolean
+  authConfigured?: boolean
   defaultBranch?: string
   repositories: string[]
   repositoryCount?: number
@@ -60,13 +60,14 @@ const GitIntegrations: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState<string | null>(null)
+  const [discovering, setDiscovering] = useState<string | null>(null)
   const [editing, setEditing] = useState<GitIntegration | null>(null)
   const [testChecks, setTestChecks] = useState<TestCheck[]>([])
   const [form] = Form.useForm()
 
   const enabledCount = integrations.filter(item => item.enabled).length
   const repoCount = integrations.reduce((sum, item) => sum + (item.repositories?.length || 0), 0)
-  const tokenCount = integrations.filter(item => item.hasToken).length
+  const tokenCount = integrations.filter(item => item.authConfigured).length
 
   const activeRepos = useMemo(() => integrations
     .filter(item => item.enabled)
@@ -175,6 +176,33 @@ const GitIntegrations: React.FC = () => {
     }
   }
 
+  const discoverRepositories = async (integration: GitIntegration) => {
+    setDiscovering(integration.id)
+    try {
+      const response = await fetch(`/api/git-integrations/${integration.id}/repositories`)
+      const data = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(data?.message || data?.error || '读取仓库失败')
+      const repositories = (data.repositories || []).map((item: any) => item.fullName).filter(Boolean)
+      const saveResponse = await fetch(`/api/git-integrations/${integration.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...integration, repositories }),
+      })
+      const saved = await saveResponse.json().catch(() => null)
+      if (!saveResponse.ok) throw new Error(saved?.message || saved?.error || '保存仓库失败')
+      setIntegrations(prev => prev.map(item => item.id === integration.id ? saved.integration : item))
+      if (editing?.id === integration.id) {
+        setEditing(saved.integration)
+        form.setFieldValue('repositories', repositories.join('\n'))
+      }
+      message.success(`已同步 ${repositories.length} 个 GitHub 仓库`)
+    } catch (error: any) {
+      message.error(error.message || '同步 GitHub 仓库失败')
+    } finally {
+      setDiscovering(null)
+    }
+  }
+
   return (
     <div>
       <Space align="start" size={14} style={{ marginBottom: 20 }}>
@@ -213,7 +241,7 @@ const GitIntegrations: React.FC = () => {
         showIcon
         style={{ marginBottom: 16 }}
         message="建议先接 GitHub、GitLab、Gitee"
-        description="当前版本先保存连接与仓库入口，不会自动拉取代码。后续可以在此基础上接 Issue/PR 同步、Webhook 触发自动化、仓库知识库索引和代码审查。"
+        description="连接测试会验证真实账号身份；GitHub 可自动读取当前 Token 有权访问的仓库。仓库内容不会自动下载，后续动作仍需由用户或 Workflow 明确触发。"
       />
 
       <Card
@@ -241,12 +269,15 @@ const GitIntegrations: React.FC = () => {
                 </Paragraph>
                 <Descriptions size="small" column={1}>
                   <Descriptions.Item label="地址">{item.baseUrl || '未配置'}</Descriptions.Item>
-                  <Descriptions.Item label="Token">{item.hasToken ? '已配置' : '未配置'}</Descriptions.Item>
+                  <Descriptions.Item label="Token">{item.authConfigured ? '已配置' : '未配置'}</Descriptions.Item>
                   <Descriptions.Item label="仓库">{item.repositoryCount || 0} 个</Descriptions.Item>
                 </Descriptions>
                 <Space style={{ marginTop: 12 }}>
                   <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(item)}>配置</Button>
                   <Button size="small" icon={<LinkOutlined />} loading={testing === item.id} onClick={() => testIntegration(item)}>测试</Button>
+                  {item.provider === 'github' && (
+                    <Button size="small" icon={<ReloadOutlined />} loading={discovering === item.id} onClick={() => discoverRepositories(item)}>同步仓库</Button>
+                  )}
                   {item.baseUrl && <Button size="small" type="link" onClick={() => openExternal(item.baseUrl)}>打开</Button>}
                 </Space>
               </Card>

@@ -23,7 +23,7 @@ import { addOpenKBDocument, configureOpenKBStorage, diagnoseOpenKB, getOpenKBCon
 import { ChatRequestCoordinator, normalizeChatRequestBody } from './server/core/conversation-guard.js'
 import { ApprovalCoordinator } from './server/core/approval-coordinator.js'
 import { collectProviderSSE } from './server/core/provider-stream.js'
-import { isHighRiskPermission, maskSensitiveValue, mergePreservingMaskedSecrets, redactSensitiveValue, sanitizePublicError } from './server/core/security.js'
+import { MASKED_SECRET, REDACTED, isHighRiskPermission, maskSensitiveValue, mergePreservingMaskedSecrets, redactSensitiveValue, sanitizePublicError } from './server/core/security.js'
 import { assertValidWorkflow, MAX_WORKFLOW_NODES } from './server/core/workflow-guard.js'
 import { ConversationMemoryStore, buildConversationMemoryContext } from './server/core/conversation-memory.js'
 import { ToolGovernanceStore, ToolRateLimiter, resolveToolPolicy } from './server/core/tool-governance.js'
@@ -33,6 +33,7 @@ import { ConversationPolicyRegistry } from './server/core/conversation-policy-re
 import { filterAndRankKnowledgeResults, isConversationArchivePath, isHistoricalConversationQuery, scoreKnowledgeCandidate } from './server/core/knowledge-relevance.js'
 import { hybridSemanticRank } from './server/core/semantic-retrieval.js'
 import { EvaluationLabelQueue } from './server/core/evaluation-label-queue.js'
+import { assertIntegrationApiUrlAllowed, buildRemoteInstanceUrl, fetchWithLimits, joinHttpUrl, normalizeHttpUrl, testChannelConnection, testRemoteInstanceConnection } from './server/core/integration-connectivity.js'
 
 const SERVER_FILE = fileURLToPath(import.meta.url)
 const SERVER_DIR = path.dirname(SERVER_FILE)
@@ -7060,6 +7061,49 @@ function saveLocalConfig(config) {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
+const CHANNEL_CATALOG = [
+  { id: 'weixin', name: '微信', type: 'wechat' },
+  { id: 'wecom', name: '企业微信', type: 'wecom' },
+  { id: 'feishu', name: '飞书', type: 'generic' },
+  { id: 'qqbot', name: 'QQ', type: 'generic' },
+  { id: 'dingtalk', name: '钉钉', type: 'generic' },
+  { id: 'telegram', name: 'Telegram', type: 'generic' },
+]
+
+function getChannelsConfig() {
+  const config = loadLocalConfig()
+  const saved = config.channels || {}
+  return CHANNEL_CATALOG.map(item => {
+    const storageKey = item.id === 'weixin' ? 'openclaw-weixin' : item.id
+    return { ...item, ...(saved[storageKey] || {}), id: item.id, name: item.name, type: item.type }
+  })
+}
+
+function publicChannel(channel) {
+  return {
+    ...maskSensitiveValue(channel),
+    status: channel.lastTest?.success ? 'connected' : channel.lastTest ? 'error' : 'disconnected',
+  }
+}
+
+function saveChannelConfig(id, incoming) {
+  const catalog = CHANNEL_CATALOG.find(item => item.id === id)
+  if (!catalog) throw Object.assign(new Error('渠道不存在'), { statusCode: 404 })
+  const config = loadLocalConfig()
+  config.channels = config.channels || {}
+  const storageKey = id === 'weixin' ? 'openclaw-weixin' : id
+  const previous = config.channels[storageKey] || {}
+  const allowed = id === 'weixin' || id === 'wecom'
+    ? ['enabled', 'corpId', 'agentId', 'secret', 'token', 'aesKey']
+    : ['enabled', 'appId', 'appSecret', 'webhook']
+  const nextInput = Object.fromEntries(allowed.filter(key => key in (incoming || {})).map(key => [key, incoming[key]]))
+  const next = mergePreservingMaskedSecrets(previous, nextInput)
+  if (next.webhook) next.webhook = normalizeHttpUrl(next.webhook)
+  config.channels[storageKey] = { ...previous, ...next, updatedAt: new Date().toISOString() }
+  saveLocalConfig(config)
+  return { ...catalog, ...config.channels[storageKey] }
+}
+
 const DEFAULT_GIT_INTEGRATIONS = [
   {
     id: 'github',
@@ -7195,7 +7239,7 @@ function publicGitIntegration(item) {
     ...item,
     token: maskSecret(item.token),
     webhookSecret: maskSecret(item.webhookSecret),
-    hasToken: !!item.token && !String(item.token).startsWith('••••'),
+    authConfigured: !!item.token && !String(item.token).startsWith('••••'),
     repositoryCount: item.repositories.length,
   }
 }
@@ -7209,10 +7253,14 @@ function saveGitIntegrationsConfig(integrations) {
 }
 
 function mergeGitIntegrationSecrets(next, previous) {
+  const preserve = (value, fallback) => {
+    const text = String(value || '')
+    return text === REDACTED || text === MASKED_SECRET || text.includes('••••') ? fallback || '' : text
+  }
   return {
     ...next,
-    token: next.token.startsWith('••••') ? previous.token || '' : next.token,
-    webhookSecret: next.webhookSecret.startsWith('••••') ? previous.webhookSecret || '' : next.webhookSecret,
+    token: preserve(next.token, previous.token),
+    webhookSecret: preserve(next.webhookSecret, previous.webhookSecret),
   }
 }
 
@@ -7906,7 +7954,7 @@ app.post('/api/cc-switch/switch', (req, res) => {
 
 // 获取所有实例
 app.get('/api/instances', (req, res) => {
-  res.json(instances.map(decorateInstanceRuntimeState))
+  res.json(instances.map(instance => maskSensitiveValue(decorateInstanceRuntimeState(instance))))
 })
 
 app.get('/api/local-agent-apps', (req, res) => {
@@ -7997,8 +8045,13 @@ app.post('/api/local-agent-apps/seed-instances', (req, res) => {
 
 // 添加新实例
 app.post('/api/instances', (req, res) => {
-  const { name, type, host, port, configPath, workspacePath, appName, bundleId, description, invocationMode, urlScheme, urlTemplate, cliCommand, cliArgsTemplate } = req.body || {}
+  const { name, type, host, port, baseUrl, healthPath, restartPath, logsPath, apiToken, timeoutMs, tls, configPath, workspacePath, appName, bundleId, description, invocationMode, urlScheme, urlTemplate, cliCommand, cliArgsTemplate } = req.body || {}
   if (!String(name || '').trim()) return res.status(400).json({ error: '实例名称不能为空' })
+  if (!['local', 'agent-desktop', 'stepfun-desktop', 'remote', 'cloud'].includes(type)) return res.status(400).json({ error: '实例类型无效' })
+  if (type === 'remote' || type === 'cloud') {
+    try { buildRemoteInstanceUrl({ host, port, baseUrl, tls }) }
+    catch (error) { return res.status(400).json({ error: '远程实例地址无效', message: sanitizePublicError(error) }) }
+  }
 
   const newInstance = {
     id: `instance-${Date.now()}`,
@@ -8006,6 +8059,13 @@ app.post('/api/instances', (req, res) => {
     type: type === 'stepfun-desktop' ? 'agent-desktop' : type,
     host,
     port,
+    baseUrl: String(baseUrl || '').trim(),
+    healthPath: String(healthPath || '/api/health').trim(),
+    restartPath: String(restartPath || '').trim(),
+    logsPath: String(logsPath || '').trim(),
+    apiToken: String(apiToken || '').trim(),
+    timeoutMs: Math.min(Math.max(Number(timeoutMs || 8000), 1000), 30000),
+    tls: tls !== false,
     configPath,
     workspacePath,
     appName,
@@ -8023,7 +8083,7 @@ app.post('/api/instances', (req, res) => {
   instances.push(newInstance)
   saveInstances(instances)
 
-  res.json(newInstance)
+  res.json(maskSensitiveValue(newInstance))
 })
 
 // 更新实例
@@ -8035,10 +8095,20 @@ app.patch('/api/instances/:id', (req, res) => {
     return res.status(404).json({ error: '实例不存在' })
   }
 
-  instances[index] = { ...instances[index], ...req.body, updatedAt: new Date().toISOString() }
+  const incoming = mergePreservingMaskedSecrets(instances[index], req.body || {})
+  if (incoming.type === 'remote' || incoming.type === 'cloud') {
+    try { buildRemoteInstanceUrl(incoming) }
+    catch (error) { return res.status(400).json({ error: '远程实例地址无效', message: sanitizePublicError(error) }) }
+  }
+  instances[index] = {
+    ...instances[index],
+    ...incoming,
+    timeoutMs: Math.min(Math.max(Number(incoming.timeoutMs || 8000), 1000), 30000),
+    updatedAt: new Date().toISOString(),
+  }
   saveInstances(instances)
 
-  res.json(instances[index])
+  res.json(maskSensitiveValue(instances[index]))
 })
 
 // 删除实例
@@ -8105,15 +8175,25 @@ app.post('/api/instances/:id/test', async (req, res) => {
           message: `未找到桌面 Agent 应用：${appName}。请确认应用已安装，或在实例配置中填写完整应用路径。`
         })
       }
-    } else if (instance.type === 'remote') {
-      // 测试远程连接
-      // TODO: 实现远程连接测试
-      res.json({ success: true, status: 'connected' })
+    } else if (instance.type === 'remote' || instance.type === 'cloud') {
+      const result = await testRemoteInstanceConnection(instance)
+      instance.status = result.status
+      instance.lastConnected = result.success ? new Date().toISOString() : instance.lastConnected
+      instance.lastRuntimeCheckedAt = new Date().toISOString()
+      instance.lastLatencyMs = result.durationMs
+      instance.remoteRuntime = result.runtime
+      saveInstances(instances)
+      res.status(result.success ? 200 : 502).json(result)
     } else {
       res.json({ success: false, status: 'unknown', message: '未知实例类型' })
     }
   } catch (error) {
-    res.status(500).json({ error: '测试连接失败', message: error.message })
+    if (instance.type === 'remote' || instance.type === 'cloud') {
+      instance.status = 'error'
+      instance.lastRuntimeCheckedAt = new Date().toISOString()
+      saveInstances(instances)
+    }
+    res.status(instance.type === 'remote' || instance.type === 'cloud' ? 502 : 500).json({ error: '测试连接失败', message: sanitizePublicError(error) })
   }
 })
 
@@ -8225,8 +8305,17 @@ app.post('/api/instances/:id/restart', (req, res) => {
         }, 1500)
       }
     })
+  } else if (instance.type === 'remote' || instance.type === 'cloud') {
+    if (!instance.restartPath) return res.status(422).json({ success: false, message: '该远程实例未配置重启 API 路径' })
+    const headers = { Accept: 'application/json' }
+    if (instance.apiToken) headers.Authorization = `Bearer ${instance.apiToken}`
+    fetchWithLimits(joinHttpUrl(buildRemoteInstanceUrl(instance), instance.restartPath), {
+      method: 'POST', headers, timeoutMs: instance.timeoutMs,
+    }).then(result => {
+      res.status(result.ok ? 200 : 502).json({ success: result.ok, message: result.ok ? '远程重启请求已接受' : `远程服务返回 ${result.status}` })
+    }).catch(error => res.status(502).json({ success: false, message: sanitizePublicError(error) }))
   } else {
-    res.json({ success: false, message: '远程实例重启暂未实现' })
+    res.json({ success: false, message: '当前实例不支持重启' })
   }
 })
 
@@ -8240,7 +8329,18 @@ app.get('/api/instances/:id/logs', (req, res) => {
     return res.status(404).json({ error: '实例不存在' })
   }
   
-  // 模拟日志数据
+  if ((instance.type === 'remote' || instance.type === 'cloud') && instance.logsPath) {
+    const headers = { Accept: 'application/json' }
+    if (instance.apiToken) headers.Authorization = `Bearer ${instance.apiToken}`
+    return fetchWithLimits(joinHttpUrl(buildRemoteInstanceUrl(instance), `${instance.logsPath}${String(instance.logsPath).includes('?') ? '&' : '?'}lines=${Math.min(Math.max(Number(lines), 1), 500)}`), {
+      method: 'GET', headers, timeoutMs: instance.timeoutMs,
+    }).then(result => {
+      const logs = Array.isArray(result.data) ? result.data : result.data?.logs
+      res.status(result.ok ? 200 : 502).json(Array.isArray(logs) ? logs.slice(0, 500) : [])
+    }).catch(error => res.status(502).json({ error: '读取远程日志失败', message: sanitizePublicError(error) }))
+  }
+
+  // 本地兼容日志
   const logs = [
     { id: '1', timestamp: '2024-05-22 10:30:15', level: 'info', source: 'system', message: '灵枢运行时启动成功' },
     { id: '2', timestamp: '2024-05-22 10:30:16', level: 'info', source: 'gateway', message: 'Gateway 监听中' },
@@ -8348,6 +8448,49 @@ app.post('/api/config', (req, res) => {
   }
 })
 
+// ==================== 外部渠道 ====================
+
+app.get('/api/channels', (_req, res) => {
+  try {
+    res.json({ channels: getChannelsConfig().map(publicChannel) })
+  } catch (error) {
+    res.status(500).json({ error: '读取渠道配置失败', message: sanitizePublicError(error) })
+  }
+})
+
+app.put('/api/channels/:id', (req, res) => {
+  try {
+    const channel = saveChannelConfig(req.params.id, req.body || {})
+    res.json({ success: true, channel: publicChannel(channel) })
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ error: '保存渠道配置失败', message: sanitizePublicError(error) })
+  }
+})
+
+app.post('/api/channels/:id/test', asyncRoute(async (req, res) => {
+  try {
+    const channel = getChannelsConfig().find(item => item.id === req.params.id)
+    if (!channel) return res.status(404).json({ error: '渠道不存在' })
+    const result = await testChannelConnection(channel)
+    const config = loadLocalConfig()
+    const storageKey = channel.id === 'weixin' ? 'openclaw-weixin' : channel.id
+    config.channels = config.channels || {}
+    config.channels[storageKey] = {
+      ...(config.channels[storageKey] || {}),
+      lastTest: {
+        success: result.success,
+        testedAt: new Date().toISOString(),
+        durationMs: result.durationMs || 0,
+        message: result.message,
+      },
+    }
+    saveLocalConfig(config)
+    res.status(result.success ? 200 : 422).json(result)
+  } catch (error) {
+    res.status(502).json({ success: false, error: '渠道连接失败', message: sanitizePublicError(error) })
+  }
+}))
+
 // ==================== Git 集成配置 ====================
 
 app.get('/api/git-integrations', (req, res) => {
@@ -8375,6 +8518,7 @@ app.put('/api/git-integrations/:id', (req, res) => {
       }, base),
       previous
     )
+    if (next.baseUrl && next.apiUrl) assertIntegrationApiUrlAllowed(next.baseUrl, next.apiUrl, next.provider)
 
     if (index >= 0) integrations[index] = next
     else integrations.push(next)
@@ -8382,7 +8526,7 @@ app.put('/api/git-integrations/:id', (req, res) => {
     saveGitIntegrationsConfig(integrations)
     res.json({ success: true, integration: publicGitIntegration(next) })
   } catch (error) {
-    res.status(500).json({ error: '保存 Git 集成失败', message: error.message })
+    res.status(400).json({ error: '保存 Git 集成失败', message: sanitizePublicError(error) })
   }
 })
 
@@ -8396,28 +8540,45 @@ app.post('/api/git-integrations/:id/test', async (req, res) => {
       { key: 'enabled', label: '已启用', ok: integration.enabled === true, value: integration.enabled ? '是' : '否' },
       { key: 'baseUrl', label: '服务地址', ok: !!integration.baseUrl, value: integration.baseUrl || '未配置' },
       { key: 'token', label: '访问令牌', ok: !!integration.token, value: integration.token ? '已配置' : '未配置' },
-      { key: 'repositories', label: '常用仓库', ok: integration.repositories.length > 0, value: `${integration.repositories.length} 个` },
+      { key: 'repositories', label: '常用仓库', ok: true, value: `${integration.repositories.length} 个`, optional: true },
     ]
 
     let reachable = false
+    let authenticated = false
+    let identity = ''
     let reachError = ''
-    if (integration.baseUrl) {
+    if (integration.apiUrl || integration.baseUrl) {
       try {
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 5000)
-        const response = await fetch(integration.baseUrl, { method: 'HEAD', signal: controller.signal })
-        clearTimeout(timer)
-        reachable = response.status < 500
+        const apiUrl = assertIntegrationApiUrlAllowed(integration.baseUrl, integration.apiUrl || integration.baseUrl, integration.provider)
+        const headers = { Accept: 'application/json', 'User-Agent': 'Lingshu/2.1' }
+        if (integration.token) {
+          headers.Authorization = integration.provider === 'gitlab'
+            ? `Bearer ${integration.token}`
+            : `Bearer ${integration.token}`
+        }
+        const identityPath = integration.provider === 'github' ? '/user' : ''
+        const result = await fetchWithLimits(joinHttpUrl(apiUrl, identityPath), { method: 'GET', headers, timeoutMs: 8000 })
+        reachable = result.status < 500
+        authenticated = integration.provider === 'github'
+          ? result.ok && !!result.data?.login
+          : result.ok
+        identity = String(result.data?.login || result.data?.username || integration.username || '')
       } catch (error) {
-        reachError = error.message || '无法访问'
+        reachError = sanitizePublicError(error, '无法访问')
       }
     }
 
     checks.push({
       key: 'reachable',
-      label: '基础可达',
+      label: 'API 可达',
       ok: reachable,
       value: reachable ? '可访问' : (reachError || '未验证'),
+    })
+    checks.push({
+      key: 'authenticated',
+      label: '账号鉴权',
+      ok: authenticated,
+      value: authenticated ? (identity || '鉴权通过') : '鉴权失败',
     })
 
     res.json({
@@ -8431,6 +8592,40 @@ app.post('/api/git-integrations/:id/test', async (req, res) => {
     res.status(500).json({ error: '测试 Git 集成失败', message: error.message })
   }
 })
+
+app.get('/api/git-integrations/:id/repositories', asyncRoute(async (req, res) => {
+  try {
+    const integration = getGitIntegrationsConfig().find(item => item.id === req.params.id)
+    if (!integration) return res.status(404).json({ error: 'Git 集成不存在' })
+    if (!integration.enabled) return res.status(409).json({ error: '请先启用该 Git 集成' })
+    if (!integration.token) return res.status(422).json({ error: '请先配置访问 Token' })
+    if (integration.provider !== 'github') return res.status(422).json({ error: '2.1 首批仓库自动发现仅支持 GitHub' })
+
+    const apiUrl = assertIntegrationApiUrlAllowed(integration.baseUrl, integration.apiUrl || 'https://api.github.com', integration.provider)
+    const result = await fetchWithLimits(joinHttpUrl(apiUrl, '/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member'), {
+      method: 'GET',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${integration.token}`,
+        'User-Agent': 'Lingshu/2.1',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      timeoutMs: 10000,
+    })
+    if (!result.ok || !Array.isArray(result.data)) throw new Error(`GitHub API 返回 ${result.status}`)
+    const repositories = result.data.slice(0, 100).map(item => ({
+      fullName: String(item.full_name || ''),
+      private: item.private === true,
+      defaultBranch: String(item.default_branch || 'main'),
+      htmlUrl: String(item.html_url || ''),
+      updatedAt: String(item.updated_at || ''),
+      permissions: item.permissions || {},
+    })).filter(item => item.fullName)
+    res.json({ repositories })
+  } catch (error) {
+    res.status(502).json({ error: '读取 GitHub 仓库失败', message: sanitizePublicError(error) })
+  }
+}))
 
 app.get('/api/git-integrations/:id/repository-url', (req, res) => {
   const { id } = req.params
@@ -13947,28 +14142,49 @@ function saveWorkflows(workflows) {
 }
 
 // 工作流执行引擎
-async function executeWorkflow(workflow) {
-  const results = []
+async function executeWorkflow(workflow, options = {}) {
+  const results = Array.isArray(options.initialResults) ? [...options.initialResults] : []
   const startTime = Date.now()
   const deadlineAt = startTime + 2 * 60 * 1000
+  const signal = options.signal
+
+  const runNode = async (node) => {
+    if (signal?.aborted) throw new DOMException('工作流已取消', 'AbortError')
+    await options.waitIfPaused?.()
+    options.onNodeStart?.(node)
+    const result = await executeNode(node, results, {
+      deadlineAt,
+      signal,
+      waitIfPaused: options.waitIfPaused,
+      shouldSkip: () => options.shouldSkip?.(node.id) === true,
+    })
+    options.onNodeComplete?.(result)
+    return result
+  }
 
   try {
     assertValidWorkflow(workflow)
-    if (workflow.mode === 'parallel') {
+    if (options.onlyNodeId) {
+      const node = workflow.nodes.find(item => item.id === options.onlyNodeId)
+      if (!node) throw new Error(`未找到节点：${options.onlyNodeId}`)
+      const result = await runNode(node)
+      if (result) results.push(result)
+    } else if (workflow.mode === 'parallel') {
       // 并行执行：找出根节点后并行处理
       const sourceNodes = new Set(workflow.edges.map(e => e.source))
       const targetNodes = new Set(workflow.edges.map(e => e.target))
       const roots = workflow.nodes.filter(n => sourceNodes.has(n.id) && !targetNodes.has(n.id))
       const leafs = workflow.nodes.filter(n => targetNodes.has(n.id) && !sourceNodes.has(n.id))
 
-      // 并行执行中间节点
+      const rootResults = await Promise.all(roots.map(runNode))
+      results.push(...rootResults.filter(Boolean))
       const middleNodes = workflow.nodes.filter(n => !roots.includes(n) && !leafs.includes(n))
-      const middleResults = await Promise.all(middleNodes.map(n => executeNode(n, results, { deadlineAt })))
+      const middleResults = await Promise.all(middleNodes.map(runNode))
       results.push(...middleResults.filter(Boolean))
 
       // 汇总到叶子节点
       for (const leaf of leafs) {
-        const r = await executeNode(leaf, results, { deadlineAt })
+        const r = await runNode(leaf)
         if (r) results.push(r)
       }
     } else if (workflow.mode === 'conditional') {
@@ -13981,12 +14197,12 @@ async function executeWorkflow(workflow) {
           if (matchedEdge) {
             const nextNode = workflow.nodes.find(n => n.id === matchedEdge.target)
             if (nextNode) {
-              const r = await executeNode(nextNode, results, { deadlineAt })
+              const r = await runNode(nextNode)
               if (r) results.push(r)
             }
           }
         } else if (node.type === 'output') {
-          const r = await executeNode(node, results, { deadlineAt })
+          const r = await runNode(node)
           if (r) results.push(r)
         }
       }
@@ -13995,7 +14211,7 @@ async function executeWorkflow(workflow) {
       const edgeMap = {}
       workflow.edges.forEach(e => { edgeMap[e.source] = e.target })
 
-      let currentNodeId = workflow.nodes.find(n => n.type === 'input')?.id || workflow.nodes[0]?.id
+      let currentNodeId = options.startNodeId || workflow.nodes.find(n => n.type === 'input')?.id || workflow.nodes[0]?.id
       const visited = new Set()
       let stepCount = 0
 
@@ -14007,7 +14223,7 @@ async function executeWorkflow(workflow) {
         stepCount += 1
         const node = workflow.nodes.find(n => n.id === currentNodeId)
         if (!node) break
-        const r = await executeNode(node, results, { deadlineAt })
+        const r = await runNode(node)
         if (r) results.push(r)
         currentNodeId = edgeMap[currentNodeId]
       }
@@ -14029,42 +14245,55 @@ async function executeWorkflow(workflow) {
 }
 
 // 执行单个节点
-function executeNode(node, context, { deadlineAt = Date.now() + 120000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const startedAt = new Date().toISOString()
-    const start = Date.now()
-    const requestedDelay = node.type === 'delay' ? Number(node.config?.ms || 1000) : 200 + Math.random() * 800
-    const delay = Math.max(0, Math.min(Number.isFinite(requestedDelay) ? requestedDelay : 1000, 30000))
-    const remainingMs = deadlineAt - Date.now()
-    if (remainingMs <= 0) return reject(new Error('工作流执行超时（120000ms）'))
-    let executionTimer
-    const deadlineTimer = setTimeout(() => {
-      clearTimeout(executionTimer)
-      reject(new Error('工作流执行超时（120000ms）'))
-    }, remainingMs)
-    executionTimer = setTimeout(() => {
-      clearTimeout(deadlineTimer)
+async function executeNode(node, context, { deadlineAt = Date.now() + 120000, signal, waitIfPaused, shouldSkip } = {}) {
+  const startedAt = new Date().toISOString()
+  const start = Date.now()
+  const requestedDelay = node.type === 'delay' ? Number(node.config?.ms || 1000) : 200 + Math.random() * 800
+  const delay = Math.max(0, Math.min(Number.isFinite(requestedDelay) ? requestedDelay : 1000, 30000))
+  let activeMs = 0
+
+  while (activeMs < delay) {
+    if (signal?.aborted) throw new DOMException('工作流已取消', 'AbortError')
+    if (Date.now() >= deadlineAt) throw new Error('工作流执行超时（120000ms）')
+    await waitIfPaused?.()
+    if (shouldSkip?.()) {
       const finishedAt = new Date().toISOString()
-      resolve({
-        nodeId: node.id,
-        nodeName: node.name,
-        type: node.type,
-        status: 'completed',
-        output: `${node.name} 执行完成`,
-        input: {
-          config: redactSensitiveValue(node.config || {}),
-          contextSize: Array.isArray(context) ? context.length : 0
-        },
-        startedAt,
-        finishedAt,
-        durationMs: Date.now() - start,
-        timestamp: finishedAt,
-      })
-    }, delay)
-  })
+      return { nodeId: node.id, nodeName: node.name, type: node.type, status: 'skipped', output: '用户跳过节点', startedAt, finishedAt, durationMs: Date.now() - start, timestamp: finishedAt }
+    }
+    const sliceMs = Math.min(100, delay - activeMs, Math.max(1, deadlineAt - Date.now()))
+    await new Promise((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer)
+        reject(new DOMException('工作流已取消', 'AbortError'))
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve()
+      }, sliceMs)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+    activeMs += sliceMs
+  }
+
+  const finishedAt = new Date().toISOString()
+  return {
+    nodeId: node.id,
+    nodeName: node.name,
+    type: node.type,
+    status: 'completed',
+    output: `${node.name} 执行完成`,
+    input: {
+      config: redactSensitiveValue(node.config || {}),
+      contextSize: Array.isArray(context) ? context.length : 0
+    },
+    startedAt,
+    finishedAt,
+    durationMs: Date.now() - start,
+    timestamp: finishedAt,
+  }
 }
 
-registerWorkflowsRoutes(app, { loadWorkflows, saveWorkflows, executeWorkflow })
+registerWorkflowsRoutes(app, { loadWorkflows, saveWorkflows, executeWorkflow, executeNode })
 registerProjectsRoutes(app)
 
 // ==================== 工具注册表 API ====================

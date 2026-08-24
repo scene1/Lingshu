@@ -512,7 +512,7 @@ const AppInner: React.FC = () => {
         onCancel={() => setGlobalSearchOpen(false)}
         footer={null}
         width={720}
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           autoFocus

@@ -46,6 +46,15 @@ interface Instance {
   status: 'connected' | 'disconnected' | 'error'
   host?: string
   port?: number
+  baseUrl?: string
+  healthPath?: string
+  restartPath?: string
+  logsPath?: string
+  apiToken?: string
+  timeoutMs?: number
+  tls?: boolean
+  lastLatencyMs?: number
+  remoteRuntime?: { status?: string; version?: string; name?: string }
   configPath: string
   workspacePath: string
   appName?: string
@@ -533,7 +542,7 @@ const InstanceManager: React.FC = () => {
 
     return (
       <List.Item className="instance-list-item">
-        <Card className="instance-card" bodyStyle={{ padding: 16 }}>
+        <Card className="instance-card" styles={{ body: { padding: 16 } }}>
           <div className="instance-card-header">
             <Space align="start" size={12}>
               <div className={`instance-card-icon instance-card-icon-${item.type}`}>
@@ -573,14 +582,20 @@ const InstanceManager: React.FC = () => {
             )}
             {!isDesktopAgent && item.type !== 'local' && (
               <div>
-                <Text type="secondary">协议</Text>
-                <div><Tag>{item.host ? 'HTTP' : '待配置'}</Tag></div>
+                <Text type="secondary">协议 / 延迟</Text>
+                <div><Tag>{item.baseUrl?.startsWith('https://') || item.tls !== false ? 'HTTPS' : 'HTTP'}</Tag>{item.lastLatencyMs ? `${item.lastLatencyMs}ms` : '-'}</div>
+              </div>
+            )}
+            {!isDesktopAgent && item.type !== 'local' && item.remoteRuntime?.version && (
+              <div>
+                <Text type="secondary">远程版本</Text>
+                <div>{item.remoteRuntime.version}</div>
               </div>
             )}
             <div className="instance-card-path">
               <Text type="secondary">{isDesktopAgent ? '应用路径' : item.type === 'local' ? '配置文件' : '连接地址'}</Text>
-              <Tooltip title={item.configPath || '-'}>
-                <div>{item.configPath || '-'}</div>
+              <Tooltip title={item.type === 'remote' || item.type === 'cloud' ? item.baseUrl || item.host || '-' : item.configPath || '-'}>
+                <div>{item.type === 'remote' || item.type === 'cloud' ? item.baseUrl || item.host || '-' : item.configPath || '-'}</div>
               </Tooltip>
             </div>
             {!options.compact && (
@@ -671,7 +686,7 @@ const InstanceManager: React.FC = () => {
   )
 
   const renderDesktopAgents = () => (
-    <Card className="instance-list-card" bodyStyle={{ padding: 0 }}>
+    <Card className="instance-list-card" styles={{ body: { padding: 0 } }}>
       <div className="instance-list-toolbar">
         <Space><DesktopOutlined /><Text strong>桌面 Agent</Text><Tag>{desktopInstances.length}</Tag></Space>
         <Button size="small" icon={<ReloadOutlined />} loading={scanningAgents} onClick={scanLocalAgentApps}>扫描</Button>
@@ -685,7 +700,7 @@ const InstanceManager: React.FC = () => {
           const deliverableMeta = getDeliverableMeta(item)
           const latestInvocation = invocationByInstanceId.get(item.id)
           return (
-            <Card key={item.id} className="instance-agent-card" bodyStyle={{ padding: 14 }}>
+            <Card key={item.id} className="instance-agent-card" styles={{ body: { padding: 14 } }}>
               <div className="instance-agent-card-head">
                 <Space size={10}>
                   <div className="instance-card-icon instance-card-icon-agent-desktop"><DesktopOutlined /></div>
@@ -724,8 +739,8 @@ const InstanceManager: React.FC = () => {
         type="warning"
         showIcon
         className="instance-inline-note"
-        message="远程/云端 Runtime 目前是连接框架"
-        description="可先维护远程 OpenClaw、Hermes、自托管 Agent Server 的地址与工作目录；SSH / HTTP / WebSocket 的真实握手和观测还需要继续接入。"
+        message="远程 Runtime 使用受控 HTTP API 连接"
+        description="支持 HTTPS 健康检查、Bearer Token、超时、远程重启和日志 API。地址不会跟随重定向，Token 不会返回到页面；SSH 与 WebSocket 暂不在 2.1 首批范围内。"
       />
       <Row gutter={[12, 12]}>
         {['远程 OpenClaw', 'Hermes', '自托管 Agent Server'].map(name => (
@@ -733,7 +748,7 @@ const InstanceManager: React.FC = () => {
             <Card className="instance-runtime-card">
               <Space direction="vertical" size={8}>
                 <Space><CloudOutlined /><Text strong>{name}</Text></Space>
-                <Text type="secondary">支持规划：SSH / HTTP / WebSocket</Text>
+                <Text type="secondary">HTTPS API / Bearer Token / 健康检查</Text>
                 <Button size="small" type="primary" ghost icon={<PlusOutlined />} onClick={handleCreate}>添加连接</Button>
               </Space>
             </Card>
@@ -840,7 +855,7 @@ const InstanceManager: React.FC = () => {
           </Space>
           <div className="instance-hero-title">连接灵枢可调用的运行环境</div>
           <Text type="secondary">
-            本地运行时负责会话和配置，桌面 Agent 负责打开或投递到外部 AI App，远程/云端实例用于后续托管能力。
+            本地运行时负责会话和配置，桌面 Agent 负责打开或投递到外部 AI App，远程/云端实例通过受控 HTTP API 接入。
           </Text>
         </div>
         <Space wrap>
@@ -881,7 +896,7 @@ const InstanceManager: React.FC = () => {
         </Col>
       </Row>
 
-      <Card className="instance-tabs-card" bodyStyle={{ padding: 0 }}>
+      <Card className="instance-tabs-card" styles={{ body: { padding: 0 } }}>
         <Tabs
           activeKey={activeTab}
           onChange={setActiveTab}
@@ -1118,23 +1133,62 @@ const InstanceManager: React.FC = () => {
             </>
           )}
           
-          <Form.Item
+          {(selectedType === 'remote' || selectedType === 'cloud') && (
+            <>
+              <Form.Item
+                name="baseUrl"
+                label="Runtime API 地址"
+                rules={[{ required: true, message: '请输入远程 Runtime API 地址' }, { type: 'url', message: '请输入完整的 HTTP/HTTPS 地址' }]}
+              >
+                <Input placeholder="https://runtime.example.com:8443" />
+              </Form.Item>
+              <Form.Item name="apiToken" label="访问 Token">
+                <Input.Password placeholder="Bearer Token；保存后不会再次显示原值" />
+              </Form.Item>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item name="healthPath" label="健康检查路径" initialValue="/api/health">
+                    <Input placeholder="/api/health" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="timeoutMs" label="超时（毫秒）" initialValue={8000}>
+                    <Input type="number" min={1000} max={30000} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item name="restartPath" label="重启 API（可选）">
+                    <Input placeholder="/api/runtime/restart" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="logsPath" label="日志 API（可选）">
+                    <Input placeholder="/api/logs" />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </>
+          )}
+
+          {selectedType !== 'remote' && selectedType !== 'cloud' && <Form.Item
             name="configPath"
             label={selectedType === 'agent-desktop' ? '应用路径 / 配置路径' : '配置路径'}
             rules={[{ required: true, message: '请输入配置路径' }]}
             initialValue="~/Lingshu/openclaw.json"
           >
             <Input placeholder={selectedType === 'agent-desktop' ? appPathExample : '~/Lingshu/openclaw.json'} />
-          </Form.Item>
+          </Form.Item>}
           
-          <Form.Item
+          {selectedType !== 'remote' && selectedType !== 'cloud' && <Form.Item
             name="workspacePath"
             label="工作目录"
             rules={[{ required: true, message: '请输入工作目录' }]}
             initialValue="~/Lingshu/workspace"
           >
             <Input placeholder={defaultWorkspacePath} />
-          </Form.Item>
+          </Form.Item>}
           
           <Form.Item
             name="description"
