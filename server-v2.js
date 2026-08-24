@@ -240,15 +240,21 @@ app.get('/api/system/self-check', (req, res) => {
 })
 
 function readPackageInfo() {
-  const fallback = { name: 'lingshu-app', version: '1.3.0', productName: '灵枢' }
+  const runtimeVersion = String(process.env.LINGSHU_APP_VERSION || '').trim()
+  const runtimeProductName = String(process.env.LINGSHU_PRODUCT_NAME || '').trim()
+  const fallback = {
+    name: 'lingshu-app',
+    version: runtimeVersion || '0.0.0',
+    productName: runtimeProductName || '灵枢'
+  }
   try {
     const packagePath = path.join(SERVER_DIR, 'package.json')
     if (!fs.existsSync(packagePath)) return fallback
     const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
     return {
       name: pkg.name || fallback.name,
-      version: pkg.version || fallback.version,
-      productName: pkg.build?.productName || fallback.productName
+      version: runtimeVersion || pkg.version || fallback.version,
+      productName: runtimeProductName || pkg.build?.productName || fallback.productName
     }
   } catch (_) {
     return fallback
@@ -325,7 +331,7 @@ function getSystemSelfCheck() {
   const knowledgeInboxBuilt = directoryContainsText(dist, 'KnowledgeInbox') || directoryContainsText(dist, '/api/knowledge-inbox')
   const searchIndexStatus = getMarkdownSearchIndexStatus({ fast: true })
   const checks = [
-    { key: 'app-version', label: '应用版本', ok: PACKAGE_INFO.version === '1.3.0', value: `v${PACKAGE_INFO.version}` },
+    { key: 'app-version', label: '应用版本', ok: /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(PACKAGE_INFO.version), value: `v${PACKAGE_INFO.version}` },
     { key: 'data-root', label: '数据目录', ...checkPath('data-root', lingshuRoot, 'dir') },
     { key: 'runtime-data', label: '运行数据', ...checkPath('runtime-data', DATA_DIR, 'dir') },
     { key: 'config', label: '运行时配置', ...checkPath('config', configPath, 'file') },

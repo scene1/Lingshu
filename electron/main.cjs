@@ -372,6 +372,8 @@ function startBackend() {
   cleanEnv.ELECTRON_RUN_AS_NODE = '1'
   delete cleanEnv.NODE_OPTIONS          // WorkBuddy 注入的 --use-system-ca 等会干扰
   cleanEnv.PORT = BACKEND_PORT.toString()
+  cleanEnv.LINGSHU_APP_VERSION = app.getVersion()
+  cleanEnv.LINGSHU_PRODUCT_NAME = app.getName()
   // 清除代理（系统代理会干扰外部 API 调用）
   delete cleanEnv.HTTP_PROXY
   delete cleanEnv.HTTPS_PROXY
