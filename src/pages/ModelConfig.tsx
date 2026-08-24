@@ -36,6 +36,7 @@ export interface ProviderConfig {
   baseUrl: string
   models: { value: string; label: string; desc: string }[]
   docUrl: string
+  keyUrl: string
   keyPlaceholder: string
   mode?: 'api-key' | 'local-cli'
 }
@@ -53,6 +54,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'step-3.5-flash', label: 'Step-3.5 Flash', desc: '轻量极速' },
     ],
     docUrl: 'https://platform.stepfun.com/',
+    keyUrl: 'https://platform.stepfun.com/account/accesskey',
     keyPlaceholder: 'your-api-key'
   },
   zhipu: {
@@ -66,6 +68,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'glm-4v', label: 'GLM-4V', desc: '多模态，支持图像' },
     ],
     docUrl: 'https://open.bigmodel.cn/',
+    keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
     keyPlaceholder: 'your-api-key'
   },
   openai: {
@@ -82,6 +85,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'gpt-4o-mini', label: 'GPT-4o Mini', desc: '经济快速' },
     ],
     docUrl: 'https://platform.openai.com/',
+    keyUrl: 'https://platform.openai.com/api-keys',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   anthropic: {
@@ -101,6 +105,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1', desc: '上一代旗舰' },
     ],
     docUrl: 'https://console.anthropic.com/',
+    keyUrl: 'https://console.anthropic.com/settings/keys',
     keyPlaceholder: 'sk-ant-xxxxxxxx'
   },
   'claude-cli': {
@@ -115,6 +120,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'fable', label: 'Fable [claude-fable-5]', desc: '旗舰模型别名' },
     ],
     docUrl: 'https://docs.anthropic.com/',
+    keyUrl: 'https://docs.anthropic.com/',
     keyPlaceholder: '无需填写，由 claude CLI 自身管理认证',
     mode: 'local-cli'
   },
@@ -129,6 +135,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'doubao-vision', label: '豆包 Vision', desc: '多模态版本' },
     ],
     docUrl: 'https://console.volcengine.com/',
+    keyUrl: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
     keyPlaceholder: 'your-api-key'
   },
   qwen: {
@@ -142,6 +149,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'qwen-turbo', label: 'Qwen Turbo', desc: '极速响应' },
     ],
     docUrl: 'https://dashscope.aliyun.com/',
+    keyUrl: 'https://dashscope.console.aliyun.com/apiKey',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   deepseek: {
@@ -156,6 +164,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'deepseek-reasoner', label: 'DeepSeek Reasoner (V3.2)', desc: '推理增强，即将废弃' },
     ],
     docUrl: 'https://platform.deepseek.com/',
+    keyUrl: 'https://platform.deepseek.com/api_keys',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   moonshot: {
@@ -169,6 +178,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'moonshot-v1-128k', label: 'Moonshot 128K', desc: '长上下文' },
     ],
     docUrl: 'https://platform.moonshot.cn/',
+    keyUrl: 'https://platform.moonshot.cn/console/api-keys',
     keyPlaceholder: 'sk-xxxxxxxx'
   },
   xiaomi: {
@@ -183,6 +193,7 @@ export const PROVIDERS: Record<string, ProviderConfig> = {
       { value: 'mimo-v2-omni', label: 'MiMo-V2 Omni', desc: '多模态（文本+图像）' },
     ],
     docUrl: 'https://platform.xiaomimimo.com/',
+    keyUrl: 'https://platform.xiaomimimo.com/',
     keyPlaceholder: 'tp-xxxxxxxx'
   },
 }
@@ -343,17 +354,14 @@ const ModelConfig: React.FC = () => {
   const isLocalCliProvider = currentConfig.mode === 'local-cli'
 
   return (
-    <Layout style={{ minHeight: '100vh', background: '#f5f5f5' }}>
+    <Layout className="model-config-page" style={{ minHeight: '100vh' }}>
       {/* 左侧提供商列表 */}
       <Sider 
+        className="model-config-sider"
         width={280} 
         theme="light"
-        style={{ 
-          borderRight: '1px solid #e8e8e8',
-          background: '#fff'
-        }}
       >
-        <div style={{ padding: '16px 24px', borderBottom: '1px solid #e8e8e8' }}>
+        <div className="model-config-provider-head">
           <Title level={4} style={{ margin: 0 }}>
             <SettingOutlined style={{ marginRight: 8 }} />
             模型配置
@@ -369,8 +377,9 @@ const ModelConfig: React.FC = () => {
       </Sider>
 
       {/* 右侧配置表单 */}
-      <Content style={{ padding: 24 }}>
+      <Content className="model-config-content">
         <Card
+          className="model-config-card"
           title={
             <Space>
               <span style={{ fontSize: 24 }}>{currentConfig.icon}</span>
@@ -390,7 +399,7 @@ const ModelConfig: React.FC = () => {
             <Button 
               type="link" 
               icon={<LinkOutlined />}
-              href={currentConfig.docUrl}
+              href={currentConfig.keyUrl}
               target="_blank"
             >
               {isLocalCliProvider ? '查看文档' : '获取 API Key'}

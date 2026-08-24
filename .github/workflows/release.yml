@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run verify
+
+  build-macos:
+    needs: verify
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run bundle:server
+      - run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+          if-no-files-found: error
+
+  build-windows:
+    needs: verify
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run bundle:server
+      - run: npx electron-builder --win --x64 --publish never
+      - name: Normalize Windows installer name
+        shell: pwsh
+        run: |
+          Get-ChildItem dist-electron -Filter *.exe | ForEach-Object {
+            Rename-Item $_.FullName ($_.BaseName + '-setup.exe')
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Generate release metadata and checksums
+        id: meta
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "title=灵枢 V${VERSION%.*}" >> "$GITHUB_OUTPUT"
+          cd release-assets
+          sha256sum Lingshu-* > "Lingshu-v${VERSION}-SHA256SUMS.txt"
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.meta.outputs.title }}
+          tag_name: ${{ github.ref_name }}
+          body_path: deliverables/release-v2.0.0.md
+          files: release-assets/*
+          draft: false
+          prerelease: false

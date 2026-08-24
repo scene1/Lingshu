@@ -32,7 +32,8 @@ import {
   SettingOutlined,
   ThunderboltOutlined,
   MessageOutlined,
-  ReloadOutlined
+  ReloadOutlined,
+  AppstoreAddOutlined
 } from '@ant-design/icons'
 import { PROVIDERS } from './ModelConfig'
 import { getAgentListFromConfig, normalizeAgentsFromConfig, type AgentStatus } from '../utils/agents'
@@ -58,6 +59,87 @@ interface Agent {
   }
 }
 
+interface AgentTemplate {
+  id: string
+  name: string
+  role: string
+  description: string
+  temperature: number
+  maxTokens: number
+  systemPrompt: string
+  skills: string[]
+  tags: string[]
+}
+
+const AGENT_TEMPLATES: AgentTemplate[] = [
+  {
+    id: 'product-strategist',
+    name: '产品策略师',
+    role: '需求拆解',
+    description: '把模糊想法拆成目标、用户场景、功能边界和可执行优先级。',
+    temperature: 0.5,
+    maxTokens: 8000,
+    skills: ['需求分析', '竞品拆解', '路线图'],
+    tags: ['产品', '规划'],
+    systemPrompt: '你是灵枢中的产品策略师。你的任务是把用户的模糊想法转成清晰的产品判断、需求边界和可执行任务。回答时先确认目标与约束，再给出优先级、风险和下一步行动。避免空泛建议，尽量输出可落地的清单、验收标准和取舍依据。'
+  },
+  {
+    id: 'research-analyst',
+    name: '研究分析员',
+    role: '资料调研',
+    description: '整理材料、提取证据、对比观点，并输出结构化结论。',
+    temperature: 0.3,
+    maxTokens: 16000,
+    skills: ['资料整理', '证据归纳', '对比分析'],
+    tags: ['研究', '知识库'],
+    systemPrompt: '你是严谨的研究分析员。你会区分事实、推断和建议，优先引用可验证信息，并在证据不足时明确标注不确定性。输出应包含核心结论、证据摘要、冲突点、可继续追问的问题和下一步建议。'
+  },
+  {
+    id: 'quality-reviewer',
+    name: '质量审查员',
+    role: '审查把关',
+    description: '检查方案、代码或文档中的漏洞、遗漏、风险和测试缺口。',
+    temperature: 0.2,
+    maxTokens: 8000,
+    skills: ['风险审查', '测试建议', '边界条件'],
+    tags: ['评审', '质量'],
+    systemPrompt: '你是质量审查员。你的默认姿态是找出真实风险，而不是复述优点。请按严重程度列出问题，说明影响、触发条件和建议修复方式。没有发现问题时也要指出剩余风险或测试缺口。'
+  },
+  {
+    id: 'document-editor',
+    name: '文档编辑',
+    role: '写作润色',
+    description: '改写、压缩、扩展和统一文档风格，保留原意并提升可读性。',
+    temperature: 0.6,
+    maxTokens: 12000,
+    skills: ['改写', '结构优化', '风格统一'],
+    tags: ['写作', '文档'],
+    systemPrompt: '你是文档编辑。你会保留用户原意，优化结构、语气、标题和段落节奏。除非用户要求，否则不要大幅扩写。输出前先判断目标读者和使用场景，并让文档更清晰、更自然、更容易执行。'
+  },
+  {
+    id: 'automation-operator',
+    name: '自动化执行员',
+    role: '流程执行',
+    description: '把重复任务拆成步骤，适合搭配 Workflow、工具和定时任务。',
+    temperature: 0.3,
+    maxTokens: 8000,
+    skills: ['流程拆解', '工具编排', '执行记录'],
+    tags: ['自动化', 'Workflow'],
+    systemPrompt: '你是自动化执行员。你会把用户目标拆解成可执行步骤，并明确每一步需要的输入、工具、成功条件和失败兜底。涉及外部操作时先检查上下文和权限，执行后输出结果、异常和后续建议。'
+  },
+  {
+    id: 'tool-specialist',
+    name: '工具专家',
+    role: '工具调用',
+    description: '判断何时调用本地工具、如何解释工具结果，并沉淀调用经验。',
+    temperature: 0.2,
+    maxTokens: 8000,
+    skills: ['工具选择', '结果解释', '审计追踪'],
+    tags: ['工具', '本地能力'],
+    systemPrompt: '你是工具专家。你会根据用户目标选择最合适的工具，明确调用参数和预期输出。工具结果返回后，你会用用户能理解的语言解释关键结果，并指出失败原因、重试方式和是否需要记录到知识库。'
+  }
+]
+
 const AgentManager: React.FC = () => {
   const [agents, setAgents] = useState<Agent[]>([])
   const [loading, setLoading] = useState(false)
@@ -70,38 +152,20 @@ const AgentManager: React.FC = () => {
   const [rawConfig, setRawConfig] = useState<any>(null)
 
   useEffect(() => {
-    loadAgents()
-    loadModelList()
+    loadAgentsWithModels()
   }, [])
 
-  const loadAgents = async () => {
+  const loadAgentsWithModels = async () => {
     setLoading(true)
     try {
       const response = await fetch('/api/config')
-      if (response.ok) {
-        const config = await response.json()
-        setRawConfig(config)
-        setAgents(normalizeAgentsFromConfig(config))
-      } else {
-        setAgents([])
-        message.error('加载 Agent 失败')
-      }
-    } catch (error) {
-      setAgents([])
-      message.error('加载 Agent 失败')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const loadModelList = async () => {
-    try {
-      const response = await fetch('/api/config')
-      if (!response.ok) return
+      if (!response.ok) throw new Error('加载失败')
       const config = await response.json()
-      const models: {key: string; label: string; provider: string}[] = []
+      setRawConfig(config)
+      setAgents(normalizeAgentsFromConfig(config))
 
-      // 系统配置的 providers（models.providers）
+      // 从同一次 API 调用中构建模型列表，避免重复请求
+      const models: {key: string; label: string; provider: string}[] = []
       if (config.models?.providers) {
         for (const [providerId, providerData] of Object.entries(config.models.providers) as [string, any][]) {
           const providerName = providerId.charAt(0).toUpperCase() + providerId.slice(1)
@@ -112,8 +176,6 @@ const AgentManager: React.FC = () => {
           }
         }
       }
-
-      // 用户自定义的 providers
       if (config.providers) {
         for (const [providerId, providerData] of Object.entries(config.providers) as [string, any][]) {
           if (!providerData.apiKey) continue
@@ -125,27 +187,58 @@ const AgentManager: React.FC = () => {
                 models.push({ key: dupKey, label: `${providerDef.name} - ${m.label}`, provider: providerId })
               }
             }
-          } else {
-            const modelId = providerData.model || `${providerId}-chat`
-            const dupKey = `${providerId}/${modelId}`
-            if (!models.find(m => m.key === dupKey)) {
-              models.push({ key: dupKey, label: providerId.charAt(0).toUpperCase() + providerId.slice(1) + ' - ' + modelId, provider: providerId })
-            }
           }
         }
       }
-
-      if (models.length > 0) {
-        setAvailableModels(models)
-      }
+      if (models.length > 0) setAvailableModels(models)
     } catch (error) {
-      console.error('加载模型列表失败:', error)
+      setAgents([])
+      message.error('加载 Agent 失败')
+    } finally {
+      setLoading(false)
     }
   }
 
   const handleCreate = () => {
     setEditingAgent(null)
     form.resetFields()
+    setModalVisible(true)
+  }
+
+  const buildUniqueAgentId = (templateId: string) => {
+    const baseId = `${templateId}-agent`
+    const existingIds = new Set(agents.map(agent => agent.id))
+    if (!existingIds.has(baseId)) return baseId
+
+    let index = 2
+    while (existingIds.has(`${baseId}-${index}`)) {
+      index += 1
+    }
+    return `${baseId}-${index}`
+  }
+
+  const getTemplateFormValues = (template: AgentTemplate) => ({
+    id: buildUniqueAgentId(template.id),
+    name: template.name,
+    description: template.description,
+    model: form.getFieldValue('model') || availableModels[0]?.key,
+    config: {
+      temperature: template.temperature,
+      maxTokens: template.maxTokens,
+      systemPrompt: template.systemPrompt,
+      skills: template.skills
+    }
+  })
+
+  const applyAgentTemplate = (template: AgentTemplate) => {
+    form.setFieldsValue(getTemplateFormValues(template))
+    message.success(`已套用「${template.name}」模板`)
+  }
+
+  const handleCreateFromTemplate = (template: AgentTemplate) => {
+    setEditingAgent(null)
+    form.resetFields()
+    form.setFieldsValue(getTemplateFormValues(template))
     setModalVisible(true)
   }
 
@@ -406,7 +499,10 @@ const AgentManager: React.FC = () => {
         title={<Title level={3}><RobotOutlined style={{ marginRight: 12 }} />Agent 角色库</Title>}
         extra={
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={loadAgents}>刷新</Button>
+            <Button icon={<ReloadOutlined />} onClick={loadAgentsWithModels}>刷新</Button>
+            <Button icon={<AppstoreAddOutlined />} onClick={() => handleCreateFromTemplate(AGENT_TEMPLATES[0])}>
+              从模板创建
+            </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
               新建 Agent 角色
             </Button>
@@ -428,9 +524,51 @@ const AgentManager: React.FC = () => {
         open={modalVisible}
         onOk={() => form.submit()}
         onCancel={() => setModalVisible(false)}
-        width={700}
+        width={840}
       >
         <Form form={form} onFinish={handleSave} layout="vertical">
+          {!editingAgent && (
+            <div style={{ marginBottom: 16 }}>
+              <Space style={{ marginBottom: 10 }}>
+                <AppstoreAddOutlined style={{ color: '#1677ff' }} />
+                <Text strong>模板库</Text>
+                <Text type="secondary">选择一个常用角色，自动填充名称、说明、参数和 System Prompt。</Text>
+              </Space>
+              <List
+                grid={{ gutter: 8, column: 2 }}
+                dataSource={AGENT_TEMPLATES}
+                renderItem={(template) => (
+                  <List.Item>
+                    <Card
+                      size="small"
+                      title={
+                        <Space size={6}>
+                          <RobotOutlined style={{ color: '#1677ff' }} />
+                          <span>{template.name}</span>
+                        </Space>
+                      }
+                      extra={
+                        <Button size="small" type="link" onClick={() => applyAgentTemplate(template)}>
+                          套用
+                        </Button>
+                      }
+                      style={{ height: '100%' }}
+                    >
+                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                        <Space wrap size={4}>
+                          <Tag color="blue">{template.role}</Tag>
+                          {template.tags.map(tag => (
+                            <Tag key={tag}>{tag}</Tag>
+                          ))}
+                        </Space>
+                        <Text type="secondary">{template.description}</Text>
+                      </Space>
+                    </Card>
+                  </List.Item>
+                )}
+              />
+            </div>
+          )}
           {!editingAgent && (
             <Form.Item
               name="id"

@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Table, Card, Row, Col, Statistic, Tag, Typography, Space, Tabs } from 'antd'
+import { Alert, Table, Card, Row, Col, Statistic, Tag, Typography, Space, Tabs } from 'antd'
 import { Radar, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis } from 'recharts'
 import { CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons'
 
@@ -159,10 +159,18 @@ const AIFrameworkCompare: React.FC = () => {
 
   return (
     <div style={{ padding: 24 }}>
-      <Title level={2}>🤖 AI Agent 框架横评</Title>
+      <Title level={2}>Agent 方法参考</Title>
       <Text type="secondary">
-        对比 ReAct、Plan-and-Execute、AutoGPT、BabyAGI、MetaGPT 五大框架的核心特性
+        用来理解不同 Agent 设计范式的取舍，不是必须配置的运行模块。
       </Text>
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginTop: 16 }}
+        message="这个页面的作用"
+        description="当你要设计新的 Agent、Workflow 或多 Agent 协作方式时，可以用这里快速比较 ReAct、Plan-and-Execute、AutoGPT、BabyAGI、MetaGPT 的适用场景。日常接入 Git、模型、Skills 或运行实例时不需要操作这里。"
+      />
 
       {/* Quick Stats */}
       <Row gutter={16} style={{ marginTop: 24, marginBottom: 24 }}>
@@ -313,3 +321,8 @@ const AIFrameworkCompare: React.FC = () => {
 }
 
 export default AIFrameworkCompare
+
+// 导出为可嵌入 Dashboard Tab 的组件
+export function AIFrameworkCompareTab() {
+  return <AIFrameworkCompare />
+}

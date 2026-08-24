@@ -1,18 +1,49 @@
-const { app, BrowserWindow, ipcMain, shell, session } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, session, globalShortcut, desktopCapturer, screen, Notification, clipboard } = require('electron')
 const path = require('path')
+const fs = require('fs')
 const { fork, execFile } = require('child_process')
 const os = require('os')
 const http = require('http')
 
+// 禁用 Chromium 沙箱（未签名的打包应用在 macOS 上无法初始化沙箱）
+app.commandLine.appendSwitch('no-sandbox')
+
+// 设置应用名称（否则 macOS 菜单栏和 Dock 显示 "Electron"）
+app.setName('灵枢')
+
 // 保持窗口对象的全局引用，防止被垃圾回收
 let mainWindow = null
 let backendProcess = null
+const appWindows = new Set()
 
 // 后端端口
-const BACKEND_PORT = Number(process.env.LINGSHU_BACKEND_PORT || process.env.OPENCLAW_BACKEND_PORT || 3105)
+const BACKEND_PORT = Number(process.env.LINGSHU_BACKEND_PORT || process.env.OPENCLAW_BACKEND_PORT || 3005)
 const FRONTEND_DEV_URL = process.env.LINGSHU_FRONTEND_URL || process.env.OPENCLAW_FRONTEND_URL || 'http://127.0.0.1:3000'
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`
 const BACKEND_READY_TIMEOUT_MS = Number(process.env.LINGSHU_BACKEND_READY_TIMEOUT_MS || 15000)
+const LINGSHU_WORKSPACE_DIR = path.join(os.homedir(), 'Lingshu', 'workspace')
+const SCREENSHOT_DIR = process.env.LINGSHU_SCREENSHOT_DIR || path.join(LINGSHU_WORKSPACE_DIR, 'uploads', 'screenshots')
+const EXPORT_DIR_CANDIDATES = [
+  process.env.LINGSHU_DATA_DIR ? path.join(process.env.LINGSHU_DATA_DIR, 'exports') : '',
+  process.env.OPENCLAW_DATA_DIR ? path.join(process.env.OPENCLAW_DATA_DIR, 'exports') : '',
+  path.join(LINGSHU_WORKSPACE_DIR, 'openclaw-web-ui-data', 'exports'),
+  path.join(LINGSHU_WORKSPACE_DIR, 'lingshu-app-data', 'exports')
+].filter(Boolean).map(item => path.resolve(item))
+const DESKTOP_SHORTCUTS = {
+  focus: 'CommandOrControl+Shift+L',
+  screenshotAsk: 'CommandOrControl+Shift+S',
+  newChatWindow: 'CommandOrControl+Shift+N'
+}
+
+function openApplicationCandidate(candidate) {
+  if (process.platform === 'darwin') {
+    return execFile('open', ['-a', candidate])
+  }
+  if (process.platform === 'win32') {
+    return execFile('cmd', ['/c', 'start', '', candidate], { windowsHide: true })
+  }
+  return execFile('xdg-open', [candidate])
+}
 
 function isInternalLingshuUrl(urlString) {
   try {
@@ -32,6 +63,16 @@ function assertTrustedSender(event) {
   if (!isTrustedSender(event)) {
     throw new Error('Untrusted renderer origin')
   }
+}
+
+function isPathInside(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child))
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+function isAllowedExportPath(filePath) {
+  const resolved = path.resolve(String(filePath || ''))
+  return EXPORT_DIR_CANDIDATES.some(dir => isPathInside(dir, resolved))
 }
 
 function waitForBackendReady(timeoutMs = BACKEND_READY_TIMEOUT_MS) {
@@ -83,9 +124,145 @@ function buildBackendErrorHtml() {
 </html>`)
 }
 
+function buildAppUrl(route = '/', backendReady = true) {
+  if (!backendReady) return `data:text/html;charset=utf-8,${buildBackendErrorHtml()}`
+  const isDev = process.env.NODE_ENV === 'development'
+  const baseUrl = isDev ? FRONTEND_DEV_URL : BACKEND_URL
+  return new URL(route || '/', baseUrl).toString()
+}
+
+function showAndFocusWindow(win) {
+  if (!win || win.isDestroyed()) return
+  if (win.isMinimized()) win.restore()
+  if (!win.isVisible()) win.show()
+  win.focus()
+}
+
+function focusMainWindow(route) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow({ route })
+    return
+  }
+  if (route) {
+    mainWindow.loadURL(buildAppUrl(route))
+  }
+  showAndFocusWindow(mainWindow)
+}
+
+function createChatWindow(route = '/') {
+  return createWindow({ route, asMain: false })
+}
+
+function sendDesktopAction(action, payload = {}) {
+  const target = mainWindow && !mainWindow.isDestroyed() ? mainWindow : [...appWindows].find(win => !win.isDestroyed())
+  if (!target) return false
+  showAndFocusWindow(target)
+  target.webContents.send('desktop-action', { action, payload, timestamp: new Date().toISOString() })
+  return true
+}
+
+function ensureScreenshotDir() {
+  fs.mkdirSync(SCREENSHOT_DIR, { recursive: true })
+}
+
+async function capturePrimaryScreen() {
+  ensureScreenshotDir()
+  const primary = screen.getPrimaryDisplay()
+  const scaleFactor = primary.scaleFactor || 1
+  const thumbnailSize = {
+    width: Math.round(primary.size.width * scaleFactor),
+    height: Math.round(primary.size.height * scaleFactor)
+  }
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize
+  })
+  const source = sources.find(item => String(item.display_id) === String(primary.id)) || sources[0]
+  if (!source || source.thumbnail.isEmpty()) {
+    return { success: false, error: '截图失败：未获得屏幕内容，可能需要在系统设置中授予灵枢“屏幕录制”权限。' }
+  }
+  const filename = `screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.png`
+  const filePath = path.join(SCREENSHOT_DIR, filename)
+  fs.writeFileSync(filePath, source.thumbnail.toPNG())
+  return {
+    success: true,
+    filePath,
+    url: `/uploads/screenshots/${filename}`,
+    width: source.thumbnail.getSize().width,
+    height: source.thumbnail.getSize().height,
+    capturedAt: new Date().toISOString()
+  }
+}
+
+function parseClipboardPathText(value = '') {
+  return String(value || '')
+    .split(/\r?\n|\0/)
+    .map(item => item.trim())
+    .filter(Boolean)
+    .map(item => {
+      if (item.startsWith('file://')) {
+        try {
+          return decodeURIComponent(new URL(item).pathname)
+        } catch (_) {
+          return ''
+        }
+      }
+      return item
+    })
+    .filter(Boolean)
+}
+
+function readClipboardFormatAsPaths(format) {
+  const paths = []
+  try {
+    if (format === 'FileNameW') {
+      const raw = clipboard.readBuffer(format)
+      if (raw?.length) paths.push(...parseClipboardPathText(raw.toString('utf16le')))
+      return paths
+    }
+    if (format === 'FileName') {
+      const raw = clipboard.readBuffer(format)
+      if (raw?.length) paths.push(...parseClipboardPathText(raw.toString('utf8')))
+      return paths
+    }
+    const text = clipboard.read(format)
+    if (text) paths.push(...parseClipboardPathText(text))
+  } catch (_) {}
+  return paths
+}
+
+function readClipboardFiles() {
+  const formats = clipboard.availableFormats()
+  const candidatePaths = []
+  for (const format of ['public.file-url', 'NSFilenamesPboardType', 'FileNameW', 'FileName', 'text/uri-list']) {
+    if (!formats.includes(format)) continue
+    candidatePaths.push(...readClipboardFormatAsPaths(format))
+  }
+
+  // Some file managers expose copied file URLs as plain text.
+  candidatePaths.push(...parseClipboardPathText(clipboard.readText()))
+
+  const unique = [...new Set(candidatePaths)]
+  return unique.slice(0, 20).map(filePath => {
+    try {
+      const resolvedPath = fs.realpathSync(filePath)
+      const stat = fs.statSync(resolvedPath)
+      if (!stat.isFile()) return null
+      return {
+        name: path.basename(resolvedPath),
+        path: resolvedPath,
+        size: stat.size,
+        modifiedAt: stat.mtime.toISOString(),
+      }
+    } catch (_) {
+      return null
+    }
+  }).filter(Boolean)
+}
+
 // 创建主窗口
-function createWindow({ backendReady = true } = {}) {
-  mainWindow = new BrowserWindow({
+function createWindow({ backendReady = true, route = '/', asMain = true } = {}) {
+  const win = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1200,
@@ -104,68 +281,107 @@ function createWindow({ backendReady = true } = {}) {
     show: false // 先隐藏，等加载完成再显示
   })
 
+  appWindows.add(win)
+  if (asMain || !mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = win
+  }
+
   // 加载本地前端或远程前端
   const isDev = process.env.NODE_ENV === 'development'
   
   if (isDev) {
-    mainWindow.loadURL(FRONTEND_DEV_URL)
+    win.loadURL(buildAppUrl(route, true))
     if (process.env.LINGSHU_DEVTOOLS === '1' || process.env.OPENCLAW_DEVTOOLS === '1') {
-      mainWindow.webContents.openDevTools()
+      win.webContents.openDevTools()
     }
   } else {
     // 生产环境：后端服务内嵌在 Electron 主进程中通过 fork 启动
     // server.cjs 会 serve 前端 dist 静态文件，直接加载后端 URL
     if (backendReady) {
-      mainWindow.loadURL(BACKEND_URL)
+      win.loadURL(buildAppUrl(route, true))
     } else {
-      mainWindow.loadURL(`data:text/html;charset=utf-8,${buildBackendErrorHtml()}`)
+      win.loadURL(buildAppUrl(route, false))
     }
   }
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  win.webContents.setWindowOpenHandler(({ url }) => {
     if (isInternalLingshuUrl(url)) {
-      mainWindow.loadURL(url)
+      createChatWindow(new URL(url).pathname + new URL(url).search)
     } else {
       shell.openExternal(url)
     }
     return { action: 'deny' }
   })
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  win.webContents.on('will-navigate', (event, url) => {
     if (!isInternalLingshuUrl(url)) {
       event.preventDefault()
       shell.openExternal(url)
     }
   })
 
-  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     console.error('页面加载失败:', errorCode, errorDescription, validatedURL)
     if (!isDev) {
-      mainWindow.loadURL(`data:text/html;charset=utf-8,${buildBackendErrorHtml()}`)
+      win.loadURL(buildAppUrl(route, false))
     }
   })
 
+  // 捕获 renderer 进程的 console 输出
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const levels = ['debug', 'log', 'warn', 'error']
+    const label = levels[level] || 'log'
+    console.log(`[Renderer ${label}] ${message} (${sourceId}:${line})`)
+  })
+
   // 加载完成后再显示窗口
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show()
-    mainWindow.focus()
+  win.once('ready-to-show', () => {
+    win.show()
+    win.focus()
   })
 
   // 窗口关闭时处理
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  win.on('closed', () => {
+    appWindows.delete(win)
+    if (mainWindow === win) {
+      mainWindow = [...appWindows].find(item => !item.isDestroyed()) || null
+    }
   })
+
+  return win
 }
 
 // 启动后端服务（使用 fork，不需要系统 PATH 上的 node）
 function startBackend() {
-  const serverPath = path.join(__dirname, '..', 'server-v2.js')
-  
+  // 打包后用 esbuild 预打包的 server-bundle.cjs（CommonJS，依赖已内联）
+  // 开发模式用原始 server-v2.js（ESM）
+  const serverFile = app.isPackaged ? 'server-bundle.cjs' : 'server-v2.js'
+  // asar 打包后 __dirname 在 app.asar 内，fork 需要磁盘上的真实路径
+  // asarUnpack 会将 server-bundle.cjs 解包到 app.asar.unpacked 目录
+  let appDir = path.join(__dirname, '..')
+  if (appDir.includes('app.asar')) {
+    appDir = appDir.replace('app.asar', 'app.asar.unpacked')
+  }
+  const serverPath = path.join(appDir, serverFile)
+
   console.log('启动后端服务（fork）...', serverPath)
-  
+
+  // fork() 使用 Electron 二进制作为 execPath，必须设置 ELECTRON_RUN_AS_NODE=1
+  // 否则 fork 出的进程会尝试启动另一个 Electron 窗口而不是运行 Node.js 脚本
+  const cleanEnv = { ...process.env }
+  cleanEnv.ELECTRON_RUN_AS_NODE = '1'
+  delete cleanEnv.NODE_OPTIONS          // WorkBuddy 注入的 --use-system-ca 等会干扰
+  cleanEnv.PORT = BACKEND_PORT.toString()
+  // 清除代理（系统代理会干扰外部 API 调用）
+  delete cleanEnv.HTTP_PROXY
+  delete cleanEnv.HTTPS_PROXY
+  delete cleanEnv.http_proxy
+  delete cleanEnv.https_proxy
+
   backendProcess = fork(serverPath, [], {
-    env: { ...process.env, PORT: BACKEND_PORT.toString() },
-    stdio: 'pipe'
+    cwd: appDir,
+    env: cleanEnv,
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc']
   })
 
   backendProcess.stdout?.on('data', (data) => {
@@ -176,16 +392,13 @@ function startBackend() {
     console.error(`[后端错误] ${data.toString().trim()}`)
   })
 
-  backendProcess.on('message', (msg) => {
-    console.log('[后端消息]', msg)
-  })
-
-  backendProcess.on('close', (code) => {
-    console.log(`后端进程退出，代码: ${code}`)
-  })
-
   backendProcess.on('error', (err) => {
     console.error('后端进程启动失败:', err)
+  })
+
+  backendProcess.on('exit', (code, signal) => {
+    console.log(`后端进程退出: code=${code}, signal=${signal}`)
+    backendProcess = null
   })
 }
 
@@ -231,17 +444,89 @@ ipcMain.handle('open-external', async (event, url) => {
   shell.openExternal(url)
 })
 
+ipcMain.handle('desktop:open-exported-file', async (event, filePath) => {
+  assertTrustedSender(event)
+  const targetPath = path.resolve(String(filePath || ''))
+  if (!isAllowedExportPath(targetPath)) {
+    throw new Error('只能打开灵枢导出目录中的文件')
+  }
+  if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isFile()) {
+    throw new Error('导出文件不存在')
+  }
+  const error = await shell.openPath(targetPath)
+  if (error) throw new Error(error)
+  return { success: true }
+})
+
+ipcMain.handle('desktop:get-capabilities', async (event) => {
+  assertTrustedSender(event)
+  return {
+    isElectron: true,
+    shortcuts: DESKTOP_SHORTCUTS,
+    screenshotDir: SCREENSHOT_DIR,
+    canCaptureScreen: true,
+    canOpenNewWindow: true
+  }
+})
+
+ipcMain.handle('desktop:capture-screenshot', async (event) => {
+  assertTrustedSender(event)
+  return capturePrimaryScreen()
+})
+
+ipcMain.handle('desktop:read-clipboard-files', async (event) => {
+  assertTrustedSender(event)
+  return { success: true, files: readClipboardFiles() }
+})
+
+ipcMain.handle('desktop:write-clipboard-text', async (event, value = '') => {
+  assertTrustedSender(event)
+  const text = String(value || '')
+  if (!text) return { success: false, error: '复制内容为空' }
+  if (Buffer.byteLength(text, 'utf8') > 2 * 1024 * 1024) {
+    return { success: false, error: '复制内容超过 2MB 限制' }
+  }
+  clipboard.writeText(text)
+  return { success: clipboard.readText() === text }
+})
+
+ipcMain.handle('desktop:new-chat-window', async (event, route = '/') => {
+  assertTrustedSender(event)
+  createChatWindow(route || '/')
+  return { success: true }
+})
+
+ipcMain.handle('desktop:show-notification', async (event, payload = {}) => {
+  assertTrustedSender(event)
+  if (!Notification.isSupported()) {
+    return { success: false, error: '当前系统不支持桌面通知' }
+  }
+  const title = String(payload.title || '灵枢通知').slice(0, 120)
+  const body = String(payload.body || payload.content || '').slice(0, 500)
+  const route = typeof payload.route === 'string' ? payload.route : ''
+  const notification = new Notification({
+    title,
+    body,
+    silent: payload.silent === true,
+  })
+  notification.on('click', () => {
+    focusMainWindow(route || '/notifications')
+  })
+  notification.show()
+  return { success: true }
+})
+
 // IPC 处理 - 打开本地应用
 ipcMain.handle('open-app', async (event, appName) => {
   assertTrustedSender(event)
   const appNames = {
-    feishu: ['Lark', '飞书'],
-    wechat: ['WeChat', '微信'],
-    chrome: ['Google Chrome'],
+    feishu: process.platform === 'win32' ? ['Lark'] : ['Lark', '飞书'],
+    wechat: process.platform === 'win32' ? ['WeChat'] : ['WeChat', '微信'],
+    chrome: process.platform === 'win32' ? ['chrome', 'Google Chrome'] : ['Google Chrome'],
     safari: ['Safari'],
-    terminal: ['Terminal'],
-    finder: ['Finder'],
-    vscode: ['Visual Studio Code']
+    terminal: process.platform === 'win32' ? ['cmd'] : ['Terminal'],
+    finder: process.platform === 'win32' ? ['explorer'] : ['Finder'],
+    vscode: process.platform === 'win32' ? ['Code', 'Visual Studio Code'] : ['Visual Studio Code']
   }
   const candidates = appNames[appName]
   if (!candidates) return { success: false, error: '不支持的应用' }
@@ -252,8 +537,11 @@ ipcMain.handle('open-app', async (event, appName) => {
         reject({ success: false, error: '应用不存在或无法打开' })
         return
       }
-      execFile('open', ['-a', candidates[index]], (error) => {
-        if (error) tryOpen(index + 1)
+      const child = openApplicationCandidate(candidates[index])
+      child.on('error', () => tryOpen(index + 1))
+      child.on('exit', (code) => {
+        const failed = typeof code === 'number' && code !== 0
+        if (failed) tryOpen(index + 1)
         else resolve({ success: true })
       })
     }
@@ -273,11 +561,36 @@ ipcMain.handle('get-system-info', async (event) => {
   }
 })
 
+function registerDesktopShortcuts() {
+  globalShortcut.unregisterAll()
+
+  globalShortcut.register(DESKTOP_SHORTCUTS.focus, () => {
+    focusMainWindow('/')
+  })
+
+  globalShortcut.register(DESKTOP_SHORTCUTS.screenshotAsk, async () => {
+    focusMainWindow('/')
+    try {
+      const result = await capturePrimaryScreen()
+      sendDesktopAction('screenshot-captured', result)
+    } catch (error) {
+      sendDesktopAction('screenshot-captured', {
+        success: false,
+        error: error.message || '截图失败'
+      })
+    }
+  })
+
+  globalShortcut.register(DESKTOP_SHORTCUTS.newChatWindow, () => {
+    createChatWindow('/')
+  })
+}
+
 // 应用就绪
 app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const ownerUrl = webContents.getURL()
-    const allowed = isInternalLingshuUrl(ownerUrl) && ['media', 'microphone'].includes(permission)
+    const allowed = isInternalLingshuUrl(ownerUrl) && ['media', 'microphone', 'notifications'].includes(permission)
     callback(allowed)
   })
 
@@ -289,6 +602,7 @@ app.whenReady().then(async () => {
     console.error(`后端服务启动超时：${BACKEND_URL}`)
   }
   createWindow({ backendReady })
+  registerDesktopShortcuts()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -299,6 +613,7 @@ app.whenReady().then(async () => {
 
 // 应用退出前清理
 app.on('before-quit', () => {
+  globalShortcut.unregisterAll()
   stopBackend()
 })
 

@@ -1,6 +1,6 @@
 {
   "name": "lingshu-app",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "description": "灵枢 - AI 路由与知识中枢",
   "type": "module",
   "main": "electron/main.cjs",
@@ -10,11 +10,20 @@
     "preview": "vite preview",
     "start": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server-v2.js",
     "dev:api": "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem PORT=3005 node server-v2.js",
-    "electron:dev": "NODE_ENV=development electron electron/main.cjs",
-    "electron:build": "npm run build && electron-builder",
-    "electron:build:mac": "npm run build && electron-builder --mac",
-    "electron:build:win": "npm run build && electron-builder --win",
-    "electron:build:linux": "npm run build && electron-builder --linux"
+    "electron:dev": "bash dev-electron.sh",
+    "electron:start": "bash start-electron.sh",
+    "start:app": "vite build && bash start-electron.sh",
+    "electron:build": "npm run build && npm run bundle:server && electron-builder",
+    "electron:build:mac": "npm run build && npm run bundle:server && electron-builder --mac",
+    "electron:build:win": "npm run build && npm run bundle:server && electron-builder --win",
+    "electron:build:linux": "npm run build && npm run bundle:server && electron-builder --linux",
+    "bundle:server": "esbuild server-v2.js --bundle --platform=node --format=cjs --outfile=server-bundle.cjs --define:import.meta.url=__import_meta_url --banner:js='var __import_meta_url=require(\"url\").pathToFileURL(__filename).href;'",
+    "test": "node --test server/core/*.test.js evals/conversation-runtime/*.test.js",
+    "test:runtime": "node --test server/core/conversation-runtime.test.js",
+    "test:security": "node --test server/core/security.test.js",
+    "test:eval-baseline": "node --test evals/conversation-runtime/*.test.js",
+    "eval:conversation": "node evals/conversation-runtime/run-baseline.mjs",
+    "verify": "npm run build && npm run bundle:server"
   },
   "dependencies": {
     "@ant-design/icons": "^5.2.0",
@@ -28,20 +37,24 @@
     "express": "^4.18.0",
     "markdown-it": "^14.3.0",
     "multer": "^2.2.0",
+    "node-cron": "^3.0.3",
+    "pdf-parse": "^1.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.20.0",
     "recharts": "^2.10.0",
     "remark-gfm": "^4.0.1",
-    "ws": "^8.14.0"
+    "ws": "^8.14.0",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",
+    "@types/node-cron": "^3.0.11",
     "@types/react": "^18.3.29",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^30.0.0",
+    "electron": "^30.5.1",
     "electron-builder": "^24.13.0",
     "typescript": "^5.9.3",
     "vite": "^5.4.21"
@@ -55,24 +68,23 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "deliverables/skill-runtime-manifest-example.md",
+      "deliverables/sample-skills/**/*",
       "package.json",
-      "server-v2.js"
+      "server-bundle.cjs"
+    ],
+    "asarUnpack": [
+      "server-bundle.cjs",
+      "dist/**/*"
     ],
     "mac": {
+      "artifactName": "Lingshu-v${version}-mac-${arch}.${ext}",
       "target": [
         {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "target": "dmg"
         },
         {
-          "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "target": "zip"
         }
       ],
       "extendInfo": {
@@ -81,6 +93,7 @@
       "category": "public.app-category.productivity"
     },
     "win": {
+      "artifactName": "Lingshu-v${version}-win-${arch}.${ext}",
       "target": [
         "nsis",
         "zip"

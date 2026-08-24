@@ -13,9 +13,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // 打开外部链接
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  openExportedFile: (filePath) => ipcRenderer.invoke('desktop:open-exported-file', filePath),
   
   // 打开本地应用
   openApp: (appName) => ipcRenderer.invoke('open-app', appName),
+
+  // 桌面增强能力
+  getDesktopCapabilities: () => ipcRenderer.invoke('desktop:get-capabilities'),
+  captureScreenshot: () => ipcRenderer.invoke('desktop:capture-screenshot'),
+  readClipboardFiles: () => ipcRenderer.invoke('desktop:read-clipboard-files'),
+  writeClipboardText: (value) => ipcRenderer.invoke('desktop:write-clipboard-text', value),
+  openNewChatWindow: (route) => ipcRenderer.invoke('desktop:new-chat-window', route),
+  showDesktopNotification: (payload) => ipcRenderer.invoke('desktop:show-notification', payload),
+  onDesktopAction: (callback) => {
+    if (typeof callback !== 'function') return () => {}
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('desktop-action', listener)
+    return () => ipcRenderer.removeListener('desktop-action', listener)
+  },
   
   // 获取系统信息
   getSystemInfo: () => ipcRenderer.invoke('get-system-info'),

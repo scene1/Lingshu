@@ -1,0 +1,72 @@
+{
+  "runtime": {
+    "command": "scripts/run.py",
+    "args": [],
+    "timeoutMs": 30000,
+    "permissions": {
+      "skill.execution": {
+        "label": "执行 Skill 入口",
+        "level": "low",
+        "description": "仅运行本 Skill 目录内声明的 scripts/run.py"
+      },
+      "files.read": {
+        "label": "读取 Skill 目录",
+        "level": "medium",
+        "description": "读取本 Skill 目录内脚本和清单文件"
+      }
+    },
+    "parameters": [
+      {
+        "name": "prefix",
+        "label": "输出前缀",
+        "type": "string",
+        "required": true,
+        "default": "Lingshu runtime smoke test passed.",
+        "placeholder": "输出第一行文本"
+      },
+      {
+        "name": "repeat",
+        "label": "重复次数",
+        "type": "integer",
+        "default": 1,
+        "placeholder": "输出 message 的次数"
+      },
+      {
+        "name": "style",
+        "label": "输出风格",
+        "type": "select",
+        "default": "plain",
+        "options": [
+          { "label": "Plain", "value": "plain" },
+          { "label": "JSON", "value": "json" }
+        ]
+      },
+      {
+        "name": "includeArguments",
+        "label": "输出参数 JSON",
+        "type": "boolean",
+        "default": true,
+        "placeholder": "在结果中包含 arguments"
+      },
+      {
+        "name": "metadata",
+        "label": "元数据 JSON",
+        "type": "json",
+        "default": {
+          "suite": "runtime-smoke",
+          "schema": 1
+        },
+        "placeholder": "{\"suite\":\"runtime-smoke\"}"
+      },
+      {
+        "name": "context",
+        "label": "上下文对象",
+        "type": "object",
+        "default": {
+          "source": "skills-test"
+        },
+        "placeholder": "{\"source\":\"skills-test\"}"
+      }
+    ]
+  }
+}

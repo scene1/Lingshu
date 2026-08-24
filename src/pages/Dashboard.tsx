@@ -17,7 +17,11 @@ import {
   Spin,
   Empty,
   Alert,
-  message
+  Tabs,
+  message,
+  Drawer,
+  Select,
+  Descriptions
 } from 'antd'
 import {
   DatabaseOutlined,
@@ -28,9 +32,17 @@ import {
   CheckCircleOutlined,
   ExclamationCircleOutlined,
   SyncOutlined,
-  FileTextOutlined
+  FileTextOutlined,
+  AppstoreOutlined,
+  TeamOutlined,
+  BranchesOutlined,
+  DownloadOutlined,
+  BarChartOutlined,
+  LinkOutlined
 } from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
 import { normalizeAgentsFromConfig, type AgentStatus } from '../utils/agents'
+import type { RunRecord } from '../types'
 
 const { Title, Text } = Typography
 
@@ -64,6 +76,11 @@ interface SystemStats {
   systemUptime: string
   cpuUsage: number
   memoryUsage: number
+  // Phase 2 扩展字段
+  todayChats?: number
+  todayTokens?: number
+  activeAgents?: number
+  activeAutomations?: number
 }
 
 interface LogEntry {
@@ -106,12 +123,53 @@ interface SearchIndexStatus {
   lastIndexedAt?: string
 }
 
+interface ModelEvaluationModel {
+  model: string
+  provider?: string
+  responseCount: number
+  callCount: number
+  errorCount: number
+  feedbackTotal: number
+  likes: number
+  dislikes: number
+  adoptedCount: number
+  abCandidateCount: number
+  avgLatencyMs: number
+  usefulRate: number | null
+  adoptionRate: number | null
+  errorRate: number
+  score: number
+  lastUsedAt?: string
+}
+
+interface ModelEvaluationData {
+  generatedAt: string
+  summary: {
+    models: number
+    responses: number
+    calls: number
+    feedback: number
+    usefulRate: number | null
+    abRuns: number
+    adoptions: number
+    avgLatencyMs: number
+    errorRate: number
+  }
+  models: ModelEvaluationModel[]
+  recentAB: Array<Record<string, any>>
+}
+
 const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(true)
+  const [activeTab, setActiveTab] = useState('workbench')
   const [stats, setStats] = useState<SystemStats | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [recentActivity, setRecentActivity] = useState<any[]>([])
+  const [runHistory, setRunHistory] = useState<RunRecord[]>([])
+  const [runHistoryType, setRunHistoryType] = useState<string>('all')
+  const [selectedRun, setSelectedRun] = useState<RunRecord | null>(null)
+  const [modelEvaluation, setModelEvaluation] = useState<ModelEvaluationData | null>(null)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [logStats, setLogStats] = useState({ total: 0, info: 0, warn: 0, error: 0 })
   const [selfCheck, setSelfCheck] = useState<SelfCheck | null>(null)
@@ -119,6 +177,31 @@ const Dashboard: React.FC = () => {
   const [rebuildingSearchIndex, setRebuildingSearchIndex] = useState(false)
   const [currentTime, setCurrentTime] = useState(new Date())
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const navigate = useNavigate()
+
+  const getRunSourceRoute = (run?: RunRecord | null) => {
+    if (!run) return ''
+    const targetId = run.targetId || ''
+    const input = (run.input && typeof run.input === 'object' ? run.input : {}) as Record<string, any>
+    if (run.type === 'workflow') return '/workflows'
+    if (run.type === 'automation') return '/automations'
+    if (run.type === 'tool') return '/tool-registry'
+    if (run.type === 'skill') return '/skills'
+    if (run.type === 'agent_team') return '/group-chat'
+    if (run.type === 'model_eval') return '/system-overview'
+    if (run.type === 'chat' || input.sessionId || targetId.startsWith('session')) return '/'
+    return ''
+  }
+
+  const openRunSource = (run: RunRecord) => {
+    const route = getRunSourceRoute(run)
+    if (!route) {
+      message.info('这条运行记录暂时没有可跳转的来源页面')
+      return
+    }
+    setSelectedRun(null)
+    navigate(route)
+  }
 
   const loadDashboardData = useCallback(async () => {
     try {
@@ -179,12 +262,25 @@ const Dashboard: React.FC = () => {
       if (searchIndexRes.ok) {
         setSearchIndexStatus(await searchIndexRes.json())
       }
+
+      const runHistoryParams = new URLSearchParams({ limit: '20' })
+      if (runHistoryType !== 'all') runHistoryParams.set('type', runHistoryType)
+      const runHistoryRes = await fetch(`/api/run-history?${runHistoryParams.toString()}`)
+      if (runHistoryRes.ok) {
+        const data = await runHistoryRes.json()
+        setRunHistory(Array.isArray(data.records) ? data.records : [])
+      }
+
+      const modelEvalRes = await fetch('/api/model-evaluations?limit=1200')
+      if (modelEvalRes.ok) {
+        setModelEvaluation(await modelEvalRes.json())
+      }
     } catch (error) {
       console.error('加载数据失败:', error)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [runHistoryType])
 
   const rebuildSearchIndex = useCallback(async () => {
     setRebuildingSearchIndex(true)
@@ -210,16 +306,17 @@ const Dashboard: React.FC = () => {
 
   useEffect(() => {
     loadDashboardData()
-    const interval = setInterval(loadDashboardData, 30000)
+    const interval = setInterval(loadDashboardData, 10000)
     pollRef.current = interval
-    // 页面不可见时暂停轮询，可见时恢复
+    // 页面不可见时暂停轮询，可见时恢复（动态间隔：活跃 10s / 非活跃 30s）
     const handleVisibility = () => {
       if (document.hidden) {
         if (pollRef.current) clearInterval(pollRef.current)
-        pollRef.current = null
+        pollRef.current = setInterval(loadDashboardData, 30000)
       } else {
+        if (pollRef.current) clearInterval(pollRef.current)
         loadDashboardData()
-        if (!pollRef.current) pollRef.current = setInterval(loadDashboardData, 30000)
+        pollRef.current = setInterval(loadDashboardData, 10000)
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
@@ -275,6 +372,137 @@ const Dashboard: React.FC = () => {
         return <ClockCircleOutlined />
     }
   }
+
+  const getRunTypeLabel = (type: string) => {
+    if (type === 'agent_team') return 'Agent Team'
+    if (type === 'workflow') return 'Workflow'
+    if (type === 'automation') return 'Automation'
+    if (type === 'tool') return 'Tool'
+    if (type === 'skill') return 'Skill'
+    if (type === 'model_eval') return '模型评测'
+    return type || 'Run'
+  }
+
+  const getRunTypeColor = (type: string) => {
+    if (type === 'agent_team') return 'purple'
+    if (type === 'workflow') return 'blue'
+    if (type === 'automation') return 'green'
+    if (type === 'tool') return 'orange'
+    if (type === 'skill') return 'cyan'
+    if (type === 'model_eval') return 'magenta'
+    return 'default'
+  }
+
+  const getRunStatusLabel = (status: string) => {
+    if (status === 'success') return '成功'
+    if (status === 'error') return '失败'
+    if (status === 'running') return '运行中'
+    if (status === 'queued') return '排队中'
+    if (status === 'cancelled') return '已取消'
+    return status || '未知'
+  }
+
+  const getRunStatusColor = (status: string) => {
+    if (status === 'success') return 'success'
+    if (status === 'error') return 'error'
+    if (status === 'running' || status === 'queued') return 'processing'
+    if (status === 'cancelled') return 'default'
+    return 'default'
+  }
+
+  const formatRunJson = (value: unknown) => {
+    if (value === undefined || value === null || value === '') return '-'
+    if (typeof value === 'string') return value
+    try {
+      return JSON.stringify(value, null, 2)
+    } catch {
+      return String(value)
+    }
+  }
+
+  const exportRunHistory = () => {
+    if (runHistory.length === 0) {
+      message.info('暂无可导出的运行记录')
+      return
+    }
+    const blob = new Blob([JSON.stringify(runHistory, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `lingshu-run-history-${runHistoryType}-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const modelEvaluationColumns = [
+    {
+      title: '模型',
+      dataIndex: 'model',
+      key: 'model',
+      render: (model: string, record: ModelEvaluationModel) => (
+        <Space direction="vertical" size={0}>
+          <Text strong ellipsis={{ tooltip: model }} style={{ maxWidth: 220 }}>{model}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {record.provider || 'provider 未记录'}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '综合分',
+      dataIndex: 'score',
+      key: 'score',
+      width: 92,
+      render: (score: number) => <Progress type="circle" percent={score || 0} size={42} />,
+    },
+    {
+      title: '调用/回复',
+      key: 'usage',
+      width: 110,
+      render: (_: any, record: ModelEvaluationModel) => (
+        <Text>{record.callCount || 0} / {record.responseCount || 0}</Text>
+      ),
+    },
+    {
+      title: '反馈',
+      key: 'feedback',
+      width: 130,
+      render: (_: any, record: ModelEvaluationModel) => (
+        <Space direction="vertical" size={0}>
+          <Text>{record.usefulRate === null ? '-' : `${record.usefulRate}%`} 有用</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {record.likes || 0} 赞 / {record.dislikes || 0} 踩
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: 'A/B 采用',
+      key: 'adoption',
+      width: 120,
+      render: (_: any, record: ModelEvaluationModel) => (
+        <Space direction="vertical" size={0}>
+          <Text>{record.adoptionRate === null ? '-' : `${record.adoptionRate}%`}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {record.adoptedCount || 0} / {record.abCandidateCount || 0}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '延迟/错误',
+      key: 'quality',
+      width: 130,
+      render: (_: any, record: ModelEvaluationModel) => (
+        <Space direction="vertical" size={0}>
+          <Text>{record.avgLatencyMs ? `${record.avgLatencyMs}ms` : '-'}</Text>
+          <Text type={record.errorRate > 0 ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
+            错误率 {record.errorRate || 0}%
+          </Text>
+        </Space>
+      ),
+    },
+  ]
 
   const agentColumns = [
     {
@@ -428,15 +656,292 @@ const Dashboard: React.FC = () => {
     )
   }
 
+  // 工作台首屏视图
+  const workbenchView = (
+    <div>
+      {/* 今日概览卡片 */}
+      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+        <Col xs={12} sm={6}>
+          <Card hoverable onClick={() => navigate('/')}>
+            <Statistic
+              title="今日对话"
+              value={stats?.todayChats ?? stats?.activeSessions ?? 0}
+              prefix={<MessageOutlined style={{ color: '#1890ff' }} />}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card hoverable>
+            <Statistic
+              title="活跃 Agent"
+              value={stats?.activeAgents ?? stats?.runningAgents ?? 0}
+              prefix={<RobotOutlined style={{ color: '#52c41a' }} />}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card hoverable onClick={() => navigate('/automations')}>
+            <Statistic
+              title="自动化任务"
+              value={stats?.activeAutomations ?? 0}
+              prefix={<BranchesOutlined style={{ color: '#722ed1' }} />}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card hoverable>
+            <Statistic
+              title="Token 用量"
+              value={stats?.todayTokens ?? 0}
+              prefix={<ThunderboltOutlined style={{ color: '#fa8c16' }} />}
+            />
+          </Card>
+        </Col>
+      </Row>
+
+      <Card
+        title={
+          <Space>
+            <BarChartOutlined />
+            模型评测与 A/B
+          </Space>
+        }
+        size="small"
+        style={{ marginBottom: 24 }}
+        extra={<Button type="link" size="small" onClick={loadDashboardData}>刷新</Button>}
+      >
+        {modelEvaluation && modelEvaluation.models.length > 0 ? (
+          <>
+            <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+              <Col xs={12} sm={6}>
+                <Statistic title="评测模型" value={modelEvaluation.summary.models || 0} />
+              </Col>
+              <Col xs={12} sm={6}>
+                <Statistic title="调用样本" value={modelEvaluation.summary.calls || modelEvaluation.summary.responses || 0} />
+              </Col>
+              <Col xs={12} sm={6}>
+                <Statistic
+                  title="有用反馈"
+                  value={modelEvaluation.summary.usefulRate ?? 0}
+                  suffix={modelEvaluation.summary.usefulRate === null ? '' : '%'}
+                />
+              </Col>
+              <Col xs={12} sm={6}>
+                <Statistic title="A/B 采用" value={modelEvaluation.summary.adoptions || 0} />
+              </Col>
+            </Row>
+            <Table
+              columns={modelEvaluationColumns}
+              dataSource={modelEvaluation.models.slice(0, 6)}
+              rowKey="model"
+              pagination={false}
+              size="small"
+            />
+            <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+              综合分按有用反馈、A/B 采用率和错误率计算；样本少时仅作方向参考。
+            </Text>
+          </>
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="暂无模型评测样本。使用对比模式并采用回复，或给 AI 回复点赞/点踩后这里会开始累积。"
+          />
+        )}
+      </Card>
+
+      {/* 快捷操作 */}
+      <Card title="快捷操作" size="small" style={{ marginBottom: 24 }}>
+        <Row gutter={[16, 16]}>
+          <Col span={4}>
+            <Card hoverable size="small" onClick={() => navigate('/')} style={{ textAlign: 'center' }}>
+              <MessageOutlined style={{ fontSize: 24, color: '#1890ff' }} />
+              <div style={{ marginTop: 8, fontSize: 12 }}>新对话</div>
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card hoverable size="small" onClick={() => navigate('/agents')} style={{ textAlign: 'center' }}>
+              <RobotOutlined style={{ fontSize: 24, color: '#52c41a' }} />
+              <div style={{ marginTop: 8, fontSize: 12 }}>Agent 管理</div>
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card hoverable size="small" onClick={() => navigate('/tool-registry')} style={{ textAlign: 'center' }}>
+              <AppstoreOutlined style={{ fontSize: 24, color: '#722ed1' }} />
+              <div style={{ marginTop: 8, fontSize: 12 }}>工具注册表</div>
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card hoverable size="small" onClick={() => navigate('/automations')} style={{ textAlign: 'center' }}>
+              <BranchesOutlined style={{ fontSize: 24, color: '#fa8c16' }} />
+              <div style={{ marginTop: 8, fontSize: 12 }}>自动化</div>
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card hoverable size="small" onClick={() => navigate('/group-chat')} style={{ textAlign: 'center' }}>
+              <TeamOutlined style={{ fontSize: 24, color: '#13c2c2' }} />
+              <div style={{ marginTop: 8, fontSize: 12 }}>多 Agent 群聊</div>
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card hoverable size="small" onClick={() => navigate('/documents')} style={{ textAlign: 'center' }}>
+              <FileTextOutlined style={{ fontSize: 24, color: '#eb2f96' }} />
+              <div style={{ marginTop: 8, fontSize: 12 }}>文档工作台</div>
+            </Card>
+          </Col>
+        </Row>
+      </Card>
+
+      <Row gutter={[16, 16]}>
+        {/* 最近对话 */}
+        <Col xs={24} lg={16}>
+          <Card title="最近对话" size="small" extra={<Button type="link" onClick={() => navigate('/')}>查看全部</Button>}>
+            {recentActivity.length > 0 ? (
+              <List
+                size="small"
+                dataSource={recentActivity.slice(0, 8)}
+                renderItem={(item: any) => (
+                  <List.Item
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => navigate('/')}
+                  >
+                    <List.Item.Meta
+                      avatar={<MessageOutlined style={{ color: '#1890ff', fontSize: 16 }} />}
+                      title={<Text ellipsis style={{ maxWidth: 400 }}>{item.message}</Text>}
+                      description={<Text type="secondary" style={{ fontSize: 12 }}>{item.time}</Text>}
+                    />
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <Empty description="暂无对话记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            )}
+          </Card>
+        </Col>
+
+        {/* 统一运行历史 */}
+        <Col xs={24} lg={8}>
+          <Card
+            title="运行历史"
+            size="small"
+            extra={
+              <Space size={6}>
+                <Select
+                  size="small"
+                  value={runHistoryType}
+                  onChange={setRunHistoryType}
+                  style={{ width: 118 }}
+                  options={[
+                    { value: 'all', label: '全部' },
+                    { value: 'agent_team', label: 'Agent Team' },
+                    { value: 'workflow', label: 'Workflow' },
+                    { value: 'automation', label: 'Automation' },
+                    { value: 'tool', label: 'Tool' },
+                    { value: 'skill', label: 'Skill' },
+                    { value: 'model_eval', label: '模型评测' },
+                  ]}
+                />
+                <Button size="small" icon={<DownloadOutlined />} onClick={exportRunHistory} />
+                <Button type="link" size="small" onClick={loadDashboardData}>刷新</Button>
+              </Space>
+            }
+          >
+            {runHistory.length > 0 ? (
+              <List
+                size="small"
+                dataSource={runHistory.slice(0, 8)}
+                renderItem={run => (
+                  <List.Item
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => setSelectedRun(run)}
+                    actions={[
+                      getRunSourceRoute(run) ? (
+                        <Button
+                          key="open"
+                          type="link"
+                          size="small"
+                          icon={<LinkOutlined />}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            openRunSource(run)
+                          }}
+                        >
+                          打开
+                        </Button>
+                      ) : null,
+                      <Button key="detail" type="link" size="small">详情</Button>,
+                    ].filter(Boolean)}
+                  >
+                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                      <Space wrap>
+                        <Tag color={getRunTypeColor(run.type)}>{getRunTypeLabel(run.type)}</Tag>
+                        <Tag color={getRunStatusColor(run.status)}>
+                          {getRunStatusLabel(run.status)}
+                        </Tag>
+                        {typeof run.durationMs === 'number' && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>{run.durationMs}ms</Text>
+                        )}
+                      </Space>
+                      <Text ellipsis={{ tooltip: run.targetName || run.targetId }} style={{ maxWidth: 260 }}>
+                        {run.targetName || run.targetId || run.id}
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {run.finishedAt ? new Date(run.finishedAt).toLocaleString('zh-CN') : new Date(run.startedAt).toLocaleString('zh-CN')}
+                        {Array.isArray(run.steps) && run.steps.length > 0 ? ` · ${run.steps.length} 步` : ''}
+                      </Text>
+                      {run.error && (
+                        <Text type="danger" ellipsis={{ tooltip: run.error }} style={{ fontSize: 12 }}>
+                          {run.error}
+                        </Text>
+                      )}
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            ) : recentActivity.length > 0 ? (
+              <Timeline mode="left">
+                {recentActivity.slice(0, 6).map((activity, index) => (
+                  <Timeline.Item
+                    key={index}
+                    color={activity.type === 'error' ? 'red' : activity.type === 'warning' ? 'orange' : 'green'}
+                  >
+                    <Text style={{ fontSize: 13 }}>{activity.message}</Text>
+                    <br />
+                    <Text type="secondary" style={{ fontSize: 12 }}>{activity.time}</Text>
+                  </Timeline.Item>
+                ))}
+              </Timeline>
+            ) : (
+              <Empty description="暂无运行记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            )}
+          </Card>
+        </Col>
+      </Row>
+    </div>
+  )
+
   return (
     <Layout style={{ minHeight: '100vh', background: '#f0f2f5', padding: '24px' }}>
-      <Title level={2} style={{ marginBottom: 24 }}>
-        <DatabaseOutlined style={{ marginRight: 12 }} />
-        系统概览
-      </Title>
-      <Text type="secondary" style={{ display: 'block', marginTop: -16, marginBottom: 24 }}>
-        合并 Dashboard 与系统状态：统一查看 Agent、会话、Skills、资源、服务状态和最近日志。当前时间：{currentTime.toLocaleString('zh-CN')}
-      </Text>
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          {
+            key: 'workbench',
+            label: '工作台',
+            children: workbenchView,
+          },
+          {
+            key: 'system',
+            label: '系统状态',
+            children: (
+              <>
+                <Title level={2} style={{ marginBottom: 24 }}>
+                  <DatabaseOutlined style={{ marginRight: 12 }} />
+                  系统概览
+                </Title>
+                <Text type="secondary" style={{ display: 'block', marginTop: -16, marginBottom: 24 }}>
+                  合并系统状态与运行分析：统一查看 Agent、会话、Skills、资源、服务状态和最近日志。当前时间：{currentTime.toLocaleString('zh-CN')}
+                </Text>
 
       <Card
         title="发布与运行自检"
@@ -708,6 +1213,107 @@ const Dashboard: React.FC = () => {
           </Card>
         </Col>
       </Row>
+              </>
+            ),
+          },
+        ]}
+      />
+      <Drawer
+        title="运行详情"
+        open={!!selectedRun}
+        onClose={() => setSelectedRun(null)}
+        width={680}
+      >
+        {selectedRun && (
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            {getRunSourceRoute(selectedRun) && (
+              <Alert
+                type="info"
+                showIcon
+                message="可打开来源页面"
+                description={`将跳转到 ${getRunSourceRoute(selectedRun)}，用于继续查看或处理这条运行记录对应的对象。`}
+                action={
+                  <Button
+                    type="primary"
+                    size="small"
+                    icon={<LinkOutlined />}
+                    onClick={() => openRunSource(selectedRun)}
+                  >
+                    打开来源
+                  </Button>
+                }
+              />
+            )}
+            <Descriptions bordered size="small" column={1}>
+              <Descriptions.Item label="类型">
+                <Tag color={getRunTypeColor(selectedRun.type)}>{getRunTypeLabel(selectedRun.type)}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <Tag color={getRunStatusColor(selectedRun.status)}>{getRunStatusLabel(selectedRun.status)}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="目标">
+                {selectedRun.targetName || selectedRun.targetId || selectedRun.id}
+              </Descriptions.Item>
+              <Descriptions.Item label="开始时间">
+                {new Date(selectedRun.startedAt).toLocaleString('zh-CN')}
+              </Descriptions.Item>
+              <Descriptions.Item label="结束时间">
+                {selectedRun.finishedAt ? new Date(selectedRun.finishedAt).toLocaleString('zh-CN') : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="耗时">
+                {typeof selectedRun.durationMs === 'number' ? `${selectedRun.durationMs}ms` : '-'}
+              </Descriptions.Item>
+              {selectedRun.error && (
+                <Descriptions.Item label="错误">
+                  <Text type="danger">{selectedRun.error}</Text>
+                </Descriptions.Item>
+              )}
+            </Descriptions>
+
+            <Card size="small" title="输入">
+              <pre style={{ margin: 0, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                {formatRunJson(selectedRun.input)}
+              </pre>
+            </Card>
+
+            <Card size="small" title="输出">
+              <pre style={{ margin: 0, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                {formatRunJson(selectedRun.output)}
+              </pre>
+            </Card>
+
+            <Card size="small" title={`步骤 (${selectedRun.steps?.length || 0})`}>
+              {Array.isArray(selectedRun.steps) && selectedRun.steps.length > 0 ? (
+                <List
+                  size="small"
+                  dataSource={selectedRun.steps}
+                  renderItem={(step: Record<string, unknown>, index) => (
+                    <List.Item>
+                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                        <Space wrap>
+                          <Tag>{String(step.type || `step-${index + 1}`)}</Tag>
+                          <Tag color={getRunStatusColor(String(step.status || ''))}>
+                            {getRunStatusLabel(String(step.status || ''))}
+                          </Tag>
+                          {typeof step.durationMs === 'number' && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>{step.durationMs}ms</Text>
+                          )}
+                        </Space>
+                        <Text strong>{String(step.name || step.agentId || step.id || `步骤 ${index + 1}`)}</Text>
+                        <pre style={{ margin: 0, maxHeight: 160, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                          {formatRunJson(step)}
+                        </pre>
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              ) : (
+                <Empty description="暂无步骤详情" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              )}
+            </Card>
+          </Space>
+        )}
+      </Drawer>
     </Layout>
   )
 }

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import {
   Layout, Tabs, Card, Form, Select, Switch, Button,
   Typography, Space, Tag, Divider, message, Modal, Input,
-  List, Spin, Statistic, InputNumber, Checkbox
+  List, Spin, Statistic, InputNumber, Checkbox, Alert, Upload, Slider
 } from 'antd'
 import {
   SettingOutlined, RobotOutlined, DatabaseOutlined,
@@ -10,9 +10,9 @@ import {
   ImportOutlined, DeleteOutlined, ClearOutlined, KeyOutlined,
   GlobalOutlined, CheckCircleOutlined, ExclamationCircleOutlined,
   SaveOutlined, FolderOpenOutlined, SearchOutlined,
-  GithubOutlined, BugOutlined, SyncOutlined
+  GithubOutlined, BugOutlined, SyncOutlined, PictureOutlined, UploadOutlined
 } from '@ant-design/icons'
-import { openExternal } from '../utils/electron'
+import { getDesktopCapabilities, openExternal } from '../utils/electron'
 import { PROVIDERS } from './ModelConfig'
 import { useSettings } from '../contexts/SettingsContext'
 
@@ -44,8 +44,24 @@ const Settings: React.FC = () => {
   const [conversationArchiveResult, setConversationArchiveResult] = useState<any>(null)
   const [agentWorkspace, setAgentWorkspace] = useState('')
   const [savingWorkspace, setSavingWorkspace] = useState(false)
+  const [isolationStatus, setIsolationStatus] = useState<any>(null)
+  const [savingIsolation, setSavingIsolation] = useState(false)
+  const [desktopCapabilities, setDesktopCapabilities] = useState<any>(null)
+  const [uploadingBackground, setUploadingBackground] = useState(false)
   const [form] = Form.useForm()
   const { updateSettings } = useSettings()
+  const defaultBackgroundSettings = {
+    enabled: false,
+    url: '',
+    fit: 'cover',
+    opacity: 0.82,
+    position: 'center',
+    repeat: 'no-repeat'
+  }
+  const backgroundSettings = {
+    ...defaultBackgroundSettings,
+    ...(settings?.appearance?.background || {})
+  }
   const filteredMemorySyncItems = memorySyncItems.filter(item => {
     const synced = !!item.syncedToObsidian?.relativePath
     if (memorySyncStatusFilter === 'unsynced' && synced) return false
@@ -76,6 +92,8 @@ const Settings: React.FC = () => {
     loadConfigs()
     loadObsidianStatus()
     loadMemorySyncStatus()
+    loadIsolationStatus()
+    loadDesktopCapabilities()
   }, [])
 
   const loadSettings = async () => {
@@ -85,6 +103,7 @@ const Settings: React.FC = () => {
         const data = await res.json()
         setSettings(data)
         form.setFieldsValue(data.general || {})
+        updateSettings(data.general || {}, data.appearance || {})
       }
     } catch (e) { console.warn('加载设置失败:', e) }
     setLoading(false)
@@ -165,7 +184,9 @@ const Settings: React.FC = () => {
       })
       if (res.ok) {
         message.success('设置已保存')
-        updateSettings(general)
+        const saved = await res.json()
+        setSettings(saved)
+        updateSettings(saved.general || general, saved.appearance || updated.appearance || {})
         // 从服务器重新拉取，确保 dataDir / cacheSize 等动态字段正确
         await loadSettings()
       } else {
@@ -173,6 +194,83 @@ const Settings: React.FC = () => {
       }
     } catch (e) { console.warn('保存失败:', e); message.error('保存失败') }
     setSaving(false)
+  }
+
+  const updateBackgroundDraft = (patch: Record<string, any>) => {
+    setSettings((prev: any) => ({
+      ...prev,
+      appearance: {
+        ...(prev?.appearance || {}),
+        background: {
+          ...defaultBackgroundSettings,
+          ...(prev?.appearance?.background || {}),
+          ...patch
+        }
+      }
+    }))
+  }
+
+  const saveAppearanceSettings = async (nextBackground = backgroundSettings, showSuccess = true) => {
+    setSaving(true)
+    try {
+      const updated = {
+        ...settings,
+        appearance: {
+          ...(settings?.appearance || {}),
+          background: {
+            ...defaultBackgroundSettings,
+            ...nextBackground
+          }
+        }
+      }
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated)
+      })
+      if (!res.ok) throw new Error('保存失败')
+      const saved = await res.json()
+      setSettings(saved)
+      updateSettings(saved.general || updated.general || {}, saved.appearance || updated.appearance)
+      if (showSuccess) message.success('外观背景已保存')
+      return true
+    } catch (e) {
+      console.warn('保存外观背景失败:', e)
+      message.error('保存外观背景失败')
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleBackgroundUpload = async (file: File) => {
+    setUploadingBackground(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await fetch('/api/appearance/background/upload', {
+        method: 'POST',
+        body: formData
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || '上传失败')
+      const nextBackground = {
+        enabled: true,
+        url: data.url,
+        fit: 'cover',
+        opacity: 0.82,
+        position: 'center',
+        repeat: 'no-repeat'
+      }
+      updateBackgroundDraft(nextBackground)
+      await saveAppearanceSettings(nextBackground, false)
+      message.success('背景图片已上传')
+    } catch (e: any) {
+      console.warn('上传背景图片失败:', e)
+      message.error(e.message || '上传背景图片失败')
+    } finally {
+      setUploadingBackground(false)
+    }
   }
 
   const updateObsidianSetting = (key: string, value: any) => {
@@ -246,6 +344,53 @@ const Settings: React.FC = () => {
       console.warn('读取记忆同步状态失败:', error)
     } finally {
       setLoadingMemorySync(false)
+    }
+  }
+
+  const loadIsolationStatus = async () => {
+    try {
+      const res = await fetch('/api/security/isolation')
+      if (res.ok) setIsolationStatus(await res.json())
+    } catch (e) {
+      console.warn('读取隔离策略失败:', e)
+    }
+  }
+
+  const loadDesktopCapabilities = async () => {
+    try {
+      const capabilities = await getDesktopCapabilities()
+      setDesktopCapabilities(capabilities)
+    } catch (_) {
+      setDesktopCapabilities(null)
+    }
+  }
+
+  const updateIsolationPolicy = (patch: Record<string, any>) => {
+    setIsolationStatus((prev: any) => ({
+      ...prev,
+      policy: {
+        ...(prev?.policy || {}),
+        ...patch,
+      }
+    }))
+  }
+
+  const saveIsolationPolicy = async () => {
+    setSavingIsolation(true)
+    try {
+      const res = await fetch('/api/security/isolation', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(isolationStatus?.policy || {})
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || data.error || '保存失败')
+      setIsolationStatus(data)
+      message.success('权限与隔离策略已保存')
+    } catch (error: any) {
+      message.error(error.message || '保存隔离策略失败')
+    } finally {
+      setSavingIsolation(false)
     }
   }
 
@@ -449,7 +594,7 @@ const Settings: React.FC = () => {
         <Select options={[
           { value: 'last', label: '打开上次会话' },
           { value: 'new', label: '新建会话' },
-          { value: 'dashboard', label: '显示 Dashboard' }
+          { value: 'system-overview', label: '显示系统概览' }
         ]} />
       </Form.Item>
       <Form.Item name="fontSize" label={<Text strong>消息字体大小 Font Size</Text>}>
@@ -562,7 +707,7 @@ const Settings: React.FC = () => {
           <Input
             value={agentWorkspace}
             onChange={e => setAgentWorkspace(e.target.value)}
-            placeholder="例如：/Users/xxx/Lingshu/workspace"
+            placeholder="例如：~/Lingshu/workspace"
             style={{ fontFamily: 'monospace' }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -784,7 +929,7 @@ const Settings: React.FC = () => {
           <Card size="small" title="对话归档到知识库">
             <Space direction="vertical" size="small" style={{ width: '100%' }}>
               <Paragraph type="secondary" style={{ margin: 0 }}>
-                新对话会自动双写到本地 JSON 和 Obsidian Markdown；也可以手动把历史会话补归档到 Codex/对话存档。
+                新对话在保存或更新时会同步写入本地 JSON 和 Obsidian Markdown，不按固定时间延迟归档；也可以手动把历史会话补归档到 灵枢/Conversations/AI对话。旧的 Codex/对话存档 会继续兼容读取。
               </Paragraph>
               <Space wrap>
                 <Button
@@ -833,8 +978,166 @@ const Settings: React.FC = () => {
     </div>
   )
 
+  const isolationPolicy = isolationStatus?.policy || {}
+  const isolationContent = (
+    <div>
+      <Alert
+        type={isolationStatus?.summary?.isolated ? 'success' : 'warning'}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message={isolationStatus?.summary?.isolated ? '本地空间隔离已启用' : '隔离策略需要确认'}
+        description="这里控制灵枢本地运行时、工具执行、Vault 写入和上传目录的权限边界。关闭某项写入权限后，对应同步/归档/API 会被策略拦截。"
+      />
+      <Card size="small" title="空间标识" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Input
+              addonBefore="Space ID"
+              value={isolationPolicy.spaceId || 'local'}
+              onChange={event => updateIsolationPolicy({ spaceId: event.target.value })}
+              style={{ width: 260 }}
+            />
+            <Input
+              addonBefore="名称"
+              value={isolationPolicy.spaceName || '本地个人空间'}
+              onChange={event => updateIsolationPolicy({ spaceName: event.target.value })}
+              style={{ width: 320 }}
+            />
+            <Select
+              value={isolationPolicy.mode || 'local-only'}
+              onChange={value => updateIsolationPolicy({ mode: value })}
+              style={{ width: 160 }}
+              options={[
+                { label: '本地优先', value: 'local-only' },
+                { label: '团队预留', value: 'team-ready' }
+              ]}
+            />
+          </Space>
+          <Text type="secondary">
+            当前基础版仅启用本地空间，后续接入团队/多空间时会用 Space ID 做数据隔离维度。
+          </Text>
+        </Space>
+      </Card>
+      <Card size="small" title="权限开关" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.enforceToolWorkspaceBoundary !== false}
+              onChange={checked => updateIsolationPolicy({ enforceToolWorkspaceBoundary: checked })}
+            />
+            <Text>工具命令只能引用受控根目录内的绝对路径</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowVaultWrite !== false}
+              onChange={checked => updateIsolationPolicy({ allowVaultWrite: checked })}
+            />
+            <Text>允许写入 Markdown Vault</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowMemoryWrite !== false}
+              onChange={checked => updateIsolationPolicy({ allowMemoryWrite: checked })}
+            />
+            <Text>允许同步记忆到 Vault</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowConversationArchive !== false}
+              onChange={checked => updateIsolationPolicy({ allowConversationArchive: checked })}
+            />
+            <Text>允许归档 AI 对话到 Vault</Text>
+          </Space>
+          <Space wrap>
+            <Switch
+              checked={isolationPolicy.allowUploads !== false}
+              onChange={checked => updateIsolationPolicy({ allowUploads: checked })}
+            />
+            <Text>允许上传目录写入</Text>
+          </Space>
+        </Space>
+      </Card>
+      <Card size="small" title="受控根目录" style={{ marginBottom: 16 }}>
+        <List
+          size="small"
+          dataSource={isolationStatus?.roots || []}
+          locale={{ emptyText: '暂无隔离目录状态' }}
+          renderItem={(root: any) => (
+            <List.Item>
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space wrap>
+                  <Tag color={root.exists && root.directory ? 'success' : 'warning'}>
+                    {root.exists && root.directory ? '可用' : '待检查'}
+                  </Tag>
+                  <Tag color={root.writable ? 'blue' : 'default'}>
+                    {root.writable ? '可写' : '只读/禁写'}
+                  </Tag>
+                  <Text strong>{root.label}</Text>
+                  <Text type="secondary">{root.source}</Text>
+                </Space>
+                <Text code ellipsis={{ tooltip: root.path }}>{root.path}</Text>
+              </Space>
+            </List.Item>
+          )}
+        />
+      </Card>
+      <Card size="small" title="额外受控目录" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+          <Input.TextArea
+            rows={3}
+            value={(isolationPolicy.allowedExtraRoots || []).join('\n')}
+            onChange={event => updateIsolationPolicy({
+              allowedExtraRoots: event.target.value.split('\n').map(item => item.trim()).filter(Boolean)
+            })}
+            placeholder="一行一个目录，例如 ~/Projects/lingshu-shared"
+            style={{ fontFamily: 'monospace' }}
+          />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            需要允许工具读取/写入其它本地项目目录时，把目录加入这里；保存后会进入工具路径边界检查。
+          </Text>
+        </Space>
+      </Card>
+      <Space>
+        <Button type="primary" icon={<SaveOutlined />} loading={savingIsolation} onClick={saveIsolationPolicy}>
+          保存隔离策略
+        </Button>
+        <Button icon={<SyncOutlined />} onClick={loadIsolationStatus}>
+          刷新状态
+        </Button>
+      </Space>
+    </div>
+  )
+
   const shortcutsContent = (
     <div>
+      <Alert
+        type={desktopCapabilities?.isElectron ? 'success' : 'info'}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message={desktopCapabilities?.isElectron ? '桌面快捷键已启用' : '当前在浏览器环境中，桌面级快捷键不可用'}
+        description={desktopCapabilities?.screenshotDir ? `截图会保存到：${desktopCapabilities.screenshotDir}` : undefined}
+      />
+      {desktopCapabilities?.shortcuts && (
+        <Card size="small" title="桌面全局快捷键" style={{ marginBottom: 16 }}>
+          <List
+            size="small"
+            dataSource={[
+              { key: desktopCapabilities.shortcuts.focus, action: '唤起灵枢主窗口' },
+              { key: desktopCapabilities.shortcuts.screenshotAsk, action: '截取主屏幕并插入 AI 对话输入框' },
+              { key: desktopCapabilities.shortcuts.newChatWindow, action: '新开一个 AI 对话窗口' },
+            ]}
+            renderItem={item => (
+              <List.Item>
+                <Space>
+                  <Tag color="green">{item.key}</Tag>
+                  <span>{item.action}</span>
+                </Space>
+              </List.Item>
+            )}
+          />
+        </Card>
+      )}
+      <Card size="small" title="应用内快捷键">
       <List
         dataSource={[
           { key: 'Cmd + K', action: '搜索 / 命令面板' },
@@ -854,6 +1157,158 @@ const Settings: React.FC = () => {
           </List.Item>
         )}
       />
+      </Card>
+    </div>
+  )
+
+  const appearanceContent = (
+    <div>
+      <Space direction="vertical" size="middle" style={{ width: '100%', maxWidth: 820 }}>
+        <Alert
+          type="info"
+          showIcon
+          message="全局背景会应用到整个应用外壳"
+          description="建议使用浅色或低对比图片，并把透明度控制在 10% 到 25%，避免影响文字和按钮可读性。"
+        />
+        <Card size="small" title="自定义背景">
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <div
+              style={{
+                height: 180,
+                borderRadius: 8,
+                border: '1px solid #e5e7eb',
+                backgroundColor: '#f8fafc',
+                backgroundImage: backgroundSettings.url ? `url("${backgroundSettings.url}")` : undefined,
+                backgroundSize: backgroundSettings.fit,
+                backgroundPosition: backgroundSettings.position,
+                backgroundRepeat: backgroundSettings.repeat,
+                opacity: backgroundSettings.url ? Math.max(0.25, backgroundSettings.opacity) : 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                overflow: 'hidden'
+              }}
+            >
+              {!backgroundSettings.url && (
+                <Space direction="vertical" align="center">
+                  <PictureOutlined style={{ fontSize: 36, color: '#94a3b8' }} />
+                  <Text type="secondary">尚未上传背景图片</Text>
+                </Space>
+              )}
+            </div>
+            <Space wrap>
+              <Upload
+                showUploadList={false}
+                accept="image/*"
+                beforeUpload={(file) => {
+                  handleBackgroundUpload(file)
+                  return false
+                }}
+              >
+                <Button icon={<UploadOutlined />} loading={uploadingBackground}>
+                  上传图片
+                </Button>
+              </Upload>
+              <Button
+                icon={<DeleteOutlined />}
+                disabled={!backgroundSettings.url}
+                onClick={() => {
+                  const nextBackground = { ...defaultBackgroundSettings }
+                  updateBackgroundDraft(nextBackground)
+                  saveAppearanceSettings(nextBackground)
+                }}
+              >
+                清除背景
+              </Button>
+              <Button
+                disabled={!backgroundSettings.url}
+                onClick={() => {
+                  updateBackgroundDraft({
+                    fit: 'cover',
+                    position: 'center',
+                    repeat: 'no-repeat',
+                    opacity: 0.82
+                  })
+                }}
+              >
+                推荐适配
+              </Button>
+              <Switch
+                checked={!!backgroundSettings.enabled}
+                disabled={!backgroundSettings.url}
+                checkedChildren="启用"
+                unCheckedChildren="关闭"
+                onChange={(checked) => updateBackgroundDraft({ enabled: checked })}
+              />
+            </Space>
+            <Form layout="vertical">
+              <Form.Item label={<Text strong>图片适配</Text>}>
+                <Select
+                  value={backgroundSettings.fit}
+                  style={{ maxWidth: 260 }}
+                  onChange={(value) => updateBackgroundDraft({ fit: value })}
+                  options={[
+                    { value: 'cover', label: '自适应填充' },
+                    { value: 'contain', label: '完整显示' },
+                    { value: '100% 100%', label: '拉伸铺满（不推荐）' },
+                    { value: 'auto', label: '原始尺寸' }
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label={<Text strong>对齐位置</Text>}>
+                <Select
+                  value={backgroundSettings.position}
+                  style={{ maxWidth: 260 }}
+                  onChange={(value) => updateBackgroundDraft({ position: value })}
+                  options={[
+                    { value: 'center', label: '居中' },
+                    { value: 'top', label: '顶部' },
+                    { value: 'bottom', label: '底部' },
+                    { value: 'left', label: '左侧' },
+                    { value: 'right', label: '右侧' }
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label={<Text strong>重复方式</Text>}>
+                <Select
+                  value={backgroundSettings.repeat}
+                  style={{ maxWidth: 260 }}
+                  onChange={(value) => updateBackgroundDraft({ repeat: value })}
+                  options={[
+                    { value: 'no-repeat', label: '不重复' },
+                    { value: 'repeat', label: '平铺' },
+                    { value: 'repeat-x', label: '横向平铺' },
+                    { value: 'repeat-y', label: '纵向平铺' }
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label={<Text strong>壁纸强度</Text>}>
+                <Slider
+                  min={0.2}
+                  max={1}
+                  step={0.01}
+                  value={backgroundSettings.opacity}
+                  onChange={(value) => updateBackgroundDraft({ opacity: value })}
+                  tooltip={{ formatter: value => `${Math.round((value || 0) * 100)}%` }}
+                />
+              </Form.Item>
+            </Form>
+            <Space>
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={saving}
+                onClick={() => saveAppearanceSettings()}
+              >
+                保存外观
+              </Button>
+              <Text type="secondary">
+                图片会保存到本机上传目录，换电脑后需要重新上传或同步该文件。
+              </Text>
+            </Space>
+          </Space>
+        </Card>
+      </Space>
     </div>
   )
 
@@ -919,8 +1374,10 @@ const Settings: React.FC = () => {
 
   const tabItems = [
     { key: 'general', label: '通用设置', icon: <SettingOutlined />, children: generalFormContent },
+    { key: 'appearance', label: '外观背景', icon: <PictureOutlined />, children: appearanceContent },
     { key: 'models', label: '模型配置', icon: <RobotOutlined />, children: modelConfigContent },
     { key: 'data', label: '数据与存储', icon: <DatabaseOutlined />, children: dataStorageContent },
+    { key: 'isolation', label: '权限与隔离', icon: <KeyOutlined />, children: isolationContent },
     { key: 'shortcuts', label: '快捷键', icon: <ThunderboltOutlined />, children: shortcutsContent },
     { key: 'about', label: '关于', icon: <InfoCircleOutlined />, children: aboutContent },
   ]
@@ -928,7 +1385,7 @@ const Settings: React.FC = () => {
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
 
   return (
-    <Layout style={{ minHeight: '100%', background: '#f5f5f5' }}>
+    <Layout style={{ minHeight: '100%', background: 'transparent' }}>
       <Content style={{ padding: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24 }}>
           <SettingOutlined style={{ fontSize: 24, color: '#1890ff', marginRight: 12 }} />

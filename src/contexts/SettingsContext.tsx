@@ -10,17 +10,30 @@ interface GeneralSettings {
   autoScroll?: boolean
 }
 
+interface AppearanceSettings {
+  background?: {
+    enabled?: boolean
+    url?: string
+    fit?: string
+    opacity?: number
+    position?: string
+    repeat?: string
+  }
+}
+
 interface SettingsContextType {
   appTheme: 'light' | 'dark'
   fontSize: number
   locale: typeof zhCN
-  updateSettings: (general: GeneralSettings) => void
+  appearance: AppearanceSettings
+  updateSettings: (general: GeneralSettings, appearance?: AppearanceSettings) => void
 }
 
 const SettingsContext = createContext<SettingsContextType>({
   appTheme: 'light',
   fontSize: 14,
   locale: zhCN,
+  appearance: {},
   updateSettings: () => {}
 })
 
@@ -31,6 +44,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [appTheme, setAppTheme] = useState<'light' | 'dark'>('light')
   const [fontSize, setFontSize] = useState<number>(14)
   const [locale, setLocale] = useState(zhCN)
+  const [appearance, setAppearance] = useState<AppearanceSettings>({})
 
   function resolveTheme(themeStr: string): 'light' | 'dark' {
     if (themeStr === 'dark') return 'dark'
@@ -53,17 +67,18 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return () => mq.removeEventListener('change', handler)
   }, [themeSetting])
 
-  const updateSettings = useCallback((general: GeneralSettings) => {
+  const updateSettings = useCallback((general: GeneralSettings, nextAppearance?: AppearanceSettings) => {
     if (general.theme) {
       setThemeSetting(general.theme)
       setAppTheme(resolveTheme(general.theme))
     }
     if (general.language) setLocale(general.language === 'en' ? enUS : zhCN)
     if (general.fontSize) setFontSize(general.fontSize)
+    if (nextAppearance) setAppearance(nextAppearance)
   }, [])
 
   return (
-    <SettingsContext.Provider value={{ appTheme, fontSize, locale, updateSettings }}>
+    <SettingsContext.Provider value={{ appTheme, fontSize, locale, appearance, updateSettings }}>
       {children}
     </SettingsContext.Provider>
   )

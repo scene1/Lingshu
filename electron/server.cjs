@@ -7,7 +7,6 @@ const os = require('os')
 
 // 兼容入口：当前 Electron 主进程默认 fork 根目录的 server-v2.js。
 // 保留此文件只是为了旧打包产物或旧脚本不直接崩溃；新增接口请优先维护 server-v2.js。
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 
 const app = express()
 const PORT = process.env.PORT || 3005

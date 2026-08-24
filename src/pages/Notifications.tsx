@@ -1,5 +1,5 @@
-import React, { useState } from 'react'
-import { Card, List, Badge, Button, Tag, Space, Tabs, message, Popconfirm } from 'antd'
+import React, { useEffect, useState, useCallback } from 'react'
+import { Card, List, Badge, Button, Tag, Space, Tabs, message, Popconfirm, Empty, Spin } from 'antd'
 import {
   CheckCircleOutlined,
   ExclamationCircleOutlined,
@@ -20,42 +20,29 @@ interface Notification {
 }
 
 const Notifications: React.FC = () => {
-  const [notifications, setNotifications] = useState<Notification[]>([
-    {
-      id: '1',
-      title: 'Skill 更新完成',
-      content: 'weather skill 已更新至 v1.1.0',
-      type: 'success',
-      timestamp: '2024-05-21 10:30',
-      read: false
-    },
-    {
-      id: '2',
-      title: '系统警告',
-      content: '内存使用率超过 80%',
-      type: 'warning',
-      timestamp: '2024-05-21 10:15',
-      read: false
-    },
-    {
-      id: '3',
-      title: '配置已保存',
-      content: '灵枢运行时配置已成功保存',
-      type: 'info',
-      timestamp: '2024-05-21 09:45',
-      read: true
-    },
-    {
-      id: '4',
-      title: '连接失败',
-      content: '微信渠道连接超时，请检查配置',
-      type: 'error',
-      timestamp: '2024-05-21 09:30',
-      read: false
-    }
-  ])
-
+  const [notifications, setNotifications] = useState<Notification[]>([])
+  const [loading, setLoading] = useState(false)
   const [activeTab, setActiveTab] = useState('all')
+
+  const loadNotifications = useCallback(async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/notifications')
+      if (!response.ok) throw new Error(`读取失败: ${response.status}`)
+      const data = await response.json()
+      setNotifications(Array.isArray(data.notifications) ? data.notifications : [])
+      window.dispatchEvent(new Event('lingshu:notifications-updated'))
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '读取通知失败')
+      setNotifications([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadNotifications()
+  }, [loadNotifications])
 
   const getIcon = (type: string) => {
     switch (type) {
@@ -80,25 +67,47 @@ const Notifications: React.FC = () => {
     return <Tag color={colors[type as keyof typeof colors]}>{type}</Tag>
   }
 
-  const handleMarkRead = (id: string) => {
-    setNotifications(notifications.map(n =>
-      n.id === id ? { ...n, read: true } : n
-    ))
+  const handleMarkRead = async (id: string) => {
+    try {
+      const response = await fetch(`/api/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' })
+      if (!response.ok) throw new Error('标记失败')
+      await loadNotifications()
+    } catch {
+      message.error('标记失败')
+    }
   }
 
-  const handleMarkAllRead = () => {
-    setNotifications(notifications.map(n => ({ ...n, read: true })))
-    message.success('全部标记为已读')
+  const handleMarkAllRead = async () => {
+    try {
+      const response = await fetch('/api/notifications/mark-all-read', { method: 'POST' })
+      if (!response.ok) throw new Error('标记失败')
+      message.success('全部标记为已读')
+      await loadNotifications()
+    } catch {
+      message.error('标记失败')
+    }
   }
 
-  const handleDelete = (id: string) => {
-    setNotifications(notifications.filter(n => n.id !== id))
-    message.success('已删除')
+  const handleDelete = async (id: string) => {
+    try {
+      const response = await fetch(`/api/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error('删除失败')
+      message.success('已删除')
+      await loadNotifications()
+    } catch {
+      message.error('删除失败')
+    }
   }
 
-  const handleClearAll = () => {
-    setNotifications([])
-    message.success('已清空所有通知')
+  const handleClearAll = async () => {
+    try {
+      const response = await fetch('/api/notifications', { method: 'DELETE' })
+      if (!response.ok) throw new Error('清空失败')
+      message.success('已清空所有通知')
+      await loadNotifications()
+    } catch {
+      message.error('清空失败')
+    }
   }
 
   const filteredNotifications = notifications.filter(n => {
@@ -121,6 +130,7 @@ const Notifications: React.FC = () => {
       <Card
         extra={
           <Space>
+            <Button onClick={loadNotifications}>刷新</Button>
             <Button onClick={handleMarkAllRead} icon={<CheckOutlined />}>
               全部已读
             </Button>
@@ -145,8 +155,10 @@ const Notifications: React.FC = () => {
           <Tabs.TabPane tab="信息" key="info" />
         </Tabs>
 
-        <List
+        <Spin spinning={loading}>
+          <List
           dataSource={filteredNotifications}
+          locale={{ emptyText: <Empty description="暂无通知" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           renderItem={item => (
             <List.Item
               style={{
@@ -187,7 +199,7 @@ const Notifications: React.FC = () => {
                   <div>
                     <div>{item.content}</div>
                     <div style={{ color: '#999', fontSize: 12, marginTop: 4 }}>
-                      {item.timestamp}
+                      {new Date(item.timestamp).toLocaleString('zh-CN')}
                     </div>
                   </div>
                 }
@@ -195,6 +207,7 @@ const Notifications: React.FC = () => {
             </List.Item>
           )}
         />
+        </Spin>
       </Card>
     </div>
   )

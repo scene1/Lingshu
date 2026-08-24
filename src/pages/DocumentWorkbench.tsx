@@ -12,6 +12,7 @@ import {
   Select,
   Space,
   Spin,
+  Steps,
   Switch,
   Tabs,
   Tag,
@@ -23,7 +24,9 @@ import remarkGfm from 'remark-gfm'
 import type { MarkdownLinkCandidate } from '../components/MarkdownCodeEditor'
 import {
   AudioOutlined,
+  CheckCircleOutlined,
   CheckOutlined,
+  ClockCircleOutlined,
   DownloadOutlined,
   DiffOutlined,
   FileTextOutlined,
@@ -224,6 +227,16 @@ interface TranscriptionSettings {
   apiKey: string
   model: string
   language: string
+}
+
+interface TranscriptionProviderCandidate {
+  id: string
+  name: string
+  baseUrl: string
+  hasApiKey: boolean
+  source?: string
+  recommendedModel?: string
+  note?: string
 }
 
 interface WorkbenchCommand {
@@ -521,6 +534,21 @@ const formatMeetingTime = (value?: string) => {
   }
 }
 
+const meetingStatusMeta = (status?: string) => {
+  if (status === 'summarized') return { label: '已生成纪要', color: 'green' }
+  if (status === 'transcribed') return { label: '已转写', color: 'blue' }
+  if (status === 'transcribing') return { label: '转写中', color: 'processing' }
+  if (status === 'recorded') return { label: '已录音', color: 'default' }
+  return { label: '准备中', color: 'default' }
+}
+
+const getMeetingStep = (meeting: Meeting | null, transcript: string, minutes: string, recording: boolean) => {
+  if (minutes || meeting?.hasMinutes || meeting?.status === 'summarized') return 3
+  if (transcript.trim() || meeting?.hasTranscript || meeting?.status === 'transcribed') return 2
+  if (recording || meeting?.hasAudio || meeting?.status === 'recorded') return 1
+  return 0
+}
+
 const DocumentWorkbench: React.FC = () => {
   const [status, setStatus] = useState<any>(null)
   const [tree, setTree] = useState<DocumentNode[]>([])
@@ -595,6 +623,10 @@ const DocumentWorkbench: React.FC = () => {
     language: 'zh'
   })
   const [savingTranscription, setSavingTranscription] = useState(false)
+  const [meetingNotice, setMeetingNotice] = useState<{ type: 'info' | 'warning' | 'success' | 'error'; message: string } | null>(null)
+  const [transcriptionCandidates, setTranscriptionCandidates] = useState<TranscriptionProviderCandidate[]>([])
+  const [selectedTranscriptionProviderId, setSelectedTranscriptionProviderId] = useState('')
+  const [importingTranscriptionProvider, setImportingTranscriptionProvider] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<BlobPart[]>([])
@@ -603,11 +635,11 @@ const DocumentWorkbench: React.FC = () => {
 
   const getServerTranscriptionIssue = useCallback((settings: TranscriptionSettings = transcriptionSettings) => {
     if (settings.provider === 'browser') {
-      return '浏览器实时识别只在“开始录音”期间产生逐字稿；导入录音或历史录音请配置 OpenAI-compatible 服务端转写，或手动粘贴逐字稿后再生成纪要。'
+      return '导入录音或历史录音转写需要配置 OpenAI-compatible 服务端转写，或先粘贴逐字稿。'
     }
-    if (!settings.enabled) return '未启用服务端转写 Provider'
+    if (!settings.enabled) return '请先启用服务端转写。'
     if (!settings.baseUrl.trim() || !settings.apiKey.trim() || !settings.model.trim()) {
-      return '服务端转写 Provider 缺少 Base URL、API Key 或模型名'
+      return '服务端转写缺少 Base URL、API Key 或模型名。'
     }
     return ''
   }, [transcriptionSettings])
@@ -634,6 +666,21 @@ const DocumentWorkbench: React.FC = () => {
   const externalDiffRows = useMemo(() => buildLineDiff(externalChange?.content || '', content), [externalChange, content])
   const isCurrentFavorite = !!document && favoriteDocs.some(item => item.path === document.path)
   const transcriptionIssue = getServerTranscriptionIssue()
+  const currentMeetingStep = getMeetingStep(meeting, transcript, minutes, recording)
+  const latestMeeting = meetingHistory[0]
+  const meetingStats = useMemo(() => ({
+    total: meetingHistory.length,
+    summarized: meetingHistory.filter(item => item.hasMinutes || item.status === 'summarized').length,
+    transcribed: meetingHistory.filter(item => item.hasTranscript || item.status === 'transcribed' || item.status === 'summarized').length,
+  }), [meetingHistory])
+  const meetingActionHint = (() => {
+    if (recording) return '录音进行中，结束后会保存音频并保留实时识别到的逐字稿。'
+    if (!meeting) return '先开始录音，或导入一段录音文件；也可以直接粘贴逐字稿。'
+    if (!transcript.trim() && meeting.hasAudio) return '已有录音，配置服务端转写后可重新转写，或直接粘贴逐字稿。'
+    if (transcript.trim() && !minutes) return '逐字稿已准备好，可以生成结构化会议纪要。'
+    if (minutes) return '纪要已生成，可在文档工作台继续编辑，或在知识库中引用。'
+    return '继续补充逐字稿，或导入录音后生成纪要。'
+  })()
 
   const loadStatus = useCallback(async () => {
     const data = await apiJson('/api/documents/status')
@@ -821,6 +868,17 @@ const DocumentWorkbench: React.FC = () => {
     } catch (_) {}
   }, [])
 
+  const loadTranscriptionCandidates = useCallback(async () => {
+    try {
+      const data = await apiJson('/api/transcription/provider-candidates')
+      const providers = Array.isArray(data.providers) ? data.providers : []
+      setTranscriptionCandidates(providers)
+      setSelectedTranscriptionProviderId(prev => prev || providers[0]?.id || '')
+    } catch (_) {
+      setTranscriptionCandidates([])
+    }
+  }, [])
+
   const loadMeetingHistory = useCallback(async () => {
     setLoadingMeetings(true)
     try {
@@ -837,10 +895,11 @@ const DocumentWorkbench: React.FC = () => {
     loadStatus().then(loadTree).catch((error: any) => message.warning(error.message))
     loadModels()
     loadTranscriptionSettings()
+    loadTranscriptionCandidates()
     loadMeetingHistory()
     loadWorkbenchState()
     loadLinkCandidates()
-  }, [loadStatus, loadTree, loadModels, loadTranscriptionSettings, loadMeetingHistory, loadWorkbenchState, loadLinkCandidates])
+  }, [loadStatus, loadTree, loadModels, loadTranscriptionSettings, loadTranscriptionCandidates, loadMeetingHistory, loadWorkbenchState, loadLinkCandidates])
 
   useEffect(() => {
     if (selectedPath) {
@@ -1308,6 +1367,7 @@ const DocumentWorkbench: React.FC = () => {
       })
       setMeeting(created)
       setMinutes('')
+      setMeetingNotice(null)
       chunksRef.current = []
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
@@ -1391,6 +1451,7 @@ const DocumentWorkbench: React.FC = () => {
       const updated = await apiJson(`/api/meetings/${created.id}/audio`, { method: 'POST', body: form })
       setMeeting(updated)
       setMinutes('')
+      setMeetingNotice(null)
       loadMeetingHistory()
       message.success(`已导入录音：${file.name}`)
     } catch (error: any) {
@@ -1409,11 +1470,11 @@ const DocumentWorkbench: React.FC = () => {
       if (hasAudio) {
         const issue = getServerTranscriptionIssue()
         if (issue) {
-          message.warning(issue)
+          setMeetingNotice({ type: 'warning', message: issue })
           return
         }
       } else {
-        message.warning('请先录音、导入录音，或手动粘贴逐字稿后再生成纪要')
+        setMeetingNotice({ type: 'info', message: '请先开始会议、导入录音，或直接粘贴逐字稿后再生成纪要。' })
         return
       }
     }
@@ -1428,6 +1489,7 @@ const DocumentWorkbench: React.FC = () => {
       if (data.transcript) setTranscript(data.transcript)
       setMinutes(data.minutes || '')
       if (data.vaultRelativePath) setSelectedPath(data.vaultRelativePath)
+      setMeetingNotice({ type: 'success', message: '会议纪要已生成，并已写入知识库。' })
       await loadTree()
       await loadMeetingHistory()
       message.success('会议纪要已生成')
@@ -1445,6 +1507,7 @@ const DocumentWorkbench: React.FC = () => {
       setMeetingTitle(data.title || '')
       setTranscript(data.transcript || '')
       setMinutes(data.minutes || '')
+      setMeetingNotice(null)
       if (data.vaultRelativePath) setSelectedPath(data.vaultRelativePath)
       message.success('已打开历史会议')
     } catch (error: any) {
@@ -1459,7 +1522,7 @@ const DocumentWorkbench: React.FC = () => {
     }
     const issue = getServerTranscriptionIssue()
     if (issue) {
-      message.warning(issue)
+      setMeetingNotice({ type: 'warning', message: issue })
       return
     }
     setRetranscribingMeetingId(item.id)
@@ -1490,7 +1553,7 @@ const DocumentWorkbench: React.FC = () => {
     if (!item.hasTranscript && item.hasAudio) {
       const issue = getServerTranscriptionIssue()
       if (issue) {
-        message.warning(issue)
+        setMeetingNotice({ type: 'warning', message: issue })
         return
       }
     }
@@ -1528,6 +1591,43 @@ const DocumentWorkbench: React.FC = () => {
       message.error(error.message)
     } finally {
       setSavingTranscription(false)
+    }
+  }
+
+  const importTranscriptionProvider = async () => {
+    if (!selectedTranscriptionProviderId) {
+      setMeetingNotice({ type: 'info', message: '没有可导入的模型 Provider，请先在模型配置里保存一个 OpenAI-compatible 服务。' })
+      return
+    }
+    setImportingTranscriptionProvider(true)
+    try {
+      const selected = transcriptionCandidates.find(item => item.id === selectedTranscriptionProviderId)
+      const data = await apiJson('/api/transcription/import-provider', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: selectedTranscriptionProviderId,
+          model: selected?.recommendedModel || transcriptionSettings.model || 'whisper-1',
+          language: transcriptionSettings.language || 'zh'
+        })
+      })
+      const next = data.transcription || {}
+      setTranscriptionSettings({
+        enabled: !!next.enabled,
+        provider: next.provider === 'openai-compatible' ? 'openai-compatible' : 'browser',
+        baseUrl: next.baseUrl || '',
+        apiKey: next.apiKey || '',
+        model: next.model || 'whisper-1',
+        language: next.language || 'zh'
+      })
+      setMeetingNotice({
+        type: 'success',
+        message: `已导入 ${selected?.name || selectedTranscriptionProviderId} 到服务端转写；请确认该服务支持 /audio/transcriptions。`
+      })
+    } catch (error: any) {
+      setMeetingNotice({ type: 'warning', message: error.message || '导入转写 Provider 失败' })
+    } finally {
+      setImportingTranscriptionProvider(false)
     }
   }
 
@@ -2384,79 +2484,53 @@ const DocumentWorkbench: React.FC = () => {
             label: '会议',
             children: (
               <div className="meeting-workspace">
-                <div className="meeting-transcription-config">
-                  <Space wrap align="center">
-                    <Switch
-                      checked={transcriptionSettings.enabled}
-                      disabled={transcriptionSettings.provider === 'browser'}
-                      onChange={checked => updateTranscriptionSetting('enabled', checked)}
-                    />
-                    <Text type="secondary">服务端转写</Text>
-                    <Select
-                      value={transcriptionSettings.provider}
-                      style={{ width: 190 }}
-                      onChange={updateTranscriptionProvider}
-                      options={[
-                        { value: 'browser', label: '浏览器实时识别（录音时）' },
-                        { value: 'openai-compatible', label: 'OpenAI-compatible（录音文件）' }
-                      ]}
-                    />
-                    {transcriptionSettings.provider === 'openai-compatible' && (
-                      <>
-                        <Input
-                          value={transcriptionSettings.baseUrl}
-                          onChange={event => updateTranscriptionSetting('baseUrl', event.target.value)}
-                          placeholder="https://api.example.com/v1"
-                          style={{ width: 260 }}
-                        />
-                        <Input.Password
-                          value={transcriptionSettings.apiKey}
-                          onChange={event => updateTranscriptionSetting('apiKey', event.target.value)}
-                          placeholder="API Key"
-                          style={{ width: 180 }}
-                        />
-                        <Input
-                          value={transcriptionSettings.model}
-                          onChange={event => updateTranscriptionSetting('model', event.target.value)}
-                          placeholder="whisper-1"
-                          style={{ width: 130 }}
-                        />
-                        <Input
-                          value={transcriptionSettings.language}
-                          onChange={event => updateTranscriptionSetting('language', event.target.value)}
-                          placeholder="zh"
-                          style={{ width: 90 }}
-                        />
-                      </>
-                    )}
-                    <Button loading={savingTranscription} onClick={saveTranscriptionSettings}>保存转写设置</Button>
-                  </Space>
-                  {transcriptionSettings.provider === 'browser' ? (
-                    <Alert
-                      style={{ marginTop: 10 }}
-                      type="info"
-                      showIcon
-                      message="浏览器实时识别只在点击“开始录音”期间产生逐字稿；导入录音、历史录音重新转写需要配置 OpenAI-compatible 服务端转写，或手动粘贴逐字稿后生成纪要。"
-                    />
-                  ) : transcriptionIssue ? (
-                    <Alert
-                      style={{ marginTop: 10 }}
-                      type="warning"
-                      showIcon
-                      message={transcriptionIssue}
-                    />
-                  ) : (
-                    <Alert
-                      style={{ marginTop: 10 }}
-                      type="success"
-                      showIcon
-                      message="服务端转写已配置：导入录音、历史会议重新转写和无逐字稿生成纪要时会自动使用该 Provider。"
-                    />
-                  )}
+                <div className="meeting-hero">
+                  <div className="meeting-hero-main">
+                    <Text type="secondary">会议工作台</Text>
+                    <div className="meeting-hero-title">
+                      {meeting?.title || meetingTitle || latestMeeting?.title || '准备一场会议'}
+                    </div>
+                    <Text type="secondary">{meetingActionHint}</Text>
+                  </div>
+                  <div className="meeting-hero-stats">
+                    <div className="meeting-stat">
+                      <span>{meetingStats.total}</span>
+                      <Text type="secondary">历史会议</Text>
+                    </div>
+                    <div className="meeting-stat">
+                      <span>{meetingStats.transcribed}</span>
+                      <Text type="secondary">已转写</Text>
+                    </div>
+                    <div className="meeting-stat">
+                      <span>{meetingStats.summarized}</span>
+                      <Text type="secondary">已成纪要</Text>
+                    </div>
+                  </div>
                 </div>
-                <div className="meeting-control">
+
+                <div className="meeting-pipeline">
+                  <Steps
+                    size="small"
+                    current={currentMeetingStep}
+                    items={[
+                      { title: '准备', description: '标题与来源' },
+                      { title: '录音', description: recording ? '正在捕获' : '导入或录制' },
+                      { title: '转写', description: transcript ? `${transcript.length} 字` : '等待逐字稿' },
+                      { title: '纪要', description: minutes ? '已生成' : '待生成' },
+                    ]}
+                  />
+                </div>
+
+                <div className="meeting-command-strip">
+                  <div className="meeting-title-field">
+                    <Input
+                      value={meetingTitle}
+                      onChange={event => setMeetingTitle(event.target.value)}
+                      placeholder="会议标题"
+                      disabled={recording}
+                    />
+                  </div>
                   <Space wrap>
-                    <Input value={meetingTitle} onChange={event => setMeetingTitle(event.target.value)} placeholder="会议标题" style={{ width: 320 }} disabled={recording} />
                     <input
                       ref={audioImportInputRef}
                       type="file"
@@ -2467,7 +2541,7 @@ const DocumentWorkbench: React.FC = () => {
                     {recording ? (
                       <Button danger type="primary" icon={<StopOutlined />} onClick={stopRecording}>结束录音</Button>
                     ) : (
-                      <Button type="primary" icon={<AudioOutlined />} onClick={startRecording}>开始录音</Button>
+                      <Button type="primary" icon={<AudioOutlined />} onClick={startRecording}>开始会议</Button>
                     )}
                     <Button
                       icon={<UploadOutlined />}
@@ -2479,20 +2553,165 @@ const DocumentWorkbench: React.FC = () => {
                     </Button>
                     <Button icon={<FileTextOutlined />} loading={finalizing} disabled={!meeting || recording || uploadingAudio} onClick={() => finalizeMeeting()}>生成纪要</Button>
                     {uploadingAudio && <Tag color="processing">保存录音中</Tag>}
-                    {meeting?.vaultRelativePath && <Tag color="green">{meeting.vaultRelativePath}</Tag>}
-                    {meeting?.transcription?.error && <Tag color="warning">{meeting.transcription.error}</Tag>}
                   </Space>
                 </div>
+
+                {meetingNotice && (
+                  <div className="meeting-inline-notice">
+                    <Alert
+                      showIcon
+                      closable
+                      type={meetingNotice.type}
+                      message={meetingNotice.message}
+                      onClose={() => setMeetingNotice(null)}
+                    />
+                  </div>
+                )}
+
+                <div className="meeting-transcription-config">
+                  <details>
+                    <summary>
+                      <Space>
+                        <ClockCircleOutlined />
+                        <Text strong>转写设置</Text>
+                        <Tag color={transcriptionSettings.provider === 'openai-compatible' && !transcriptionIssue ? 'green' : 'default'}>
+                          {transcriptionSettings.provider === 'browser' ? '浏览器实时识别' : '服务端转写'}
+                        </Tag>
+                      </Space>
+                    </summary>
+                    <div className="meeting-transcription-form">
+                      <div className="meeting-provider-import">
+                        <Space wrap align="center">
+                          <Text type="secondary">从已有模型配置导入</Text>
+                          <Select
+                            value={selectedTranscriptionProviderId || undefined}
+                            placeholder="选择已配置 Provider"
+                            style={{ minWidth: 260 }}
+                            options={transcriptionCandidates.map(item => ({
+                              value: item.id,
+                              label: `${item.name} · ${item.baseUrl}`
+                            }))}
+                            onChange={setSelectedTranscriptionProviderId}
+                            disabled={transcriptionCandidates.length === 0}
+                          />
+                          <Button
+                            loading={importingTranscriptionProvider}
+                            disabled={transcriptionCandidates.length === 0}
+                            onClick={importTranscriptionProvider}
+                          >
+                            导入为转写服务
+                          </Button>
+                          {transcriptionCandidates.length === 0 && (
+                            <Text type="secondary">暂无可复用 Provider</Text>
+                          )}
+                        </Space>
+                      </div>
+                      <Space wrap align="center">
+                        <Switch
+                          checked={transcriptionSettings.enabled}
+                          disabled={transcriptionSettings.provider === 'browser'}
+                          onChange={checked => updateTranscriptionSetting('enabled', checked)}
+                        />
+                        <Text type="secondary">服务端转写</Text>
+                        <Select
+                          value={transcriptionSettings.provider}
+                          style={{ width: 210 }}
+                          onChange={updateTranscriptionProvider}
+                          options={[
+                            { value: 'browser', label: '浏览器实时识别（录音时）' },
+                            { value: 'openai-compatible', label: 'OpenAI-compatible（录音文件）' }
+                          ]}
+                        />
+                        {transcriptionSettings.provider === 'openai-compatible' && (
+                          <>
+                            <Input
+                              value={transcriptionSettings.baseUrl}
+                              onChange={event => updateTranscriptionSetting('baseUrl', event.target.value)}
+                              placeholder="https://api.example.com/v1"
+                              style={{ width: 260 }}
+                            />
+                            <Input.Password
+                              value={transcriptionSettings.apiKey}
+                              onChange={event => updateTranscriptionSetting('apiKey', event.target.value)}
+                              placeholder="API Key"
+                              style={{ width: 180 }}
+                            />
+                            <Input
+                              value={transcriptionSettings.model}
+                              onChange={event => updateTranscriptionSetting('model', event.target.value)}
+                              placeholder="whisper-1"
+                              style={{ width: 130 }}
+                            />
+                            <Input
+                              value={transcriptionSettings.language}
+                              onChange={event => updateTranscriptionSetting('language', event.target.value)}
+                              placeholder="zh"
+                              style={{ width: 90 }}
+                            />
+                          </>
+                        )}
+                        <Button loading={savingTranscription} onClick={saveTranscriptionSettings}>保存</Button>
+                      </Space>
+                      {transcriptionSettings.provider === 'browser' ? (
+                        <Alert
+                          style={{ marginTop: 10 }}
+                          type="info"
+                          showIcon
+                          message="浏览器实时识别只在录音期间产生逐字稿；导入录音和历史录音重新转写需要配置 OpenAI-compatible 服务端转写，或手动粘贴逐字稿。"
+                        />
+                      ) : transcriptionIssue ? (
+                        <Alert
+                          style={{ marginTop: 10 }}
+                          type="warning"
+                          showIcon
+                          message={transcriptionIssue}
+                        />
+                      ) : (
+                        <Alert
+                          style={{ marginTop: 10 }}
+                          type="success"
+                          showIcon
+                          message="服务端转写已配置：导入录音、历史会议重新转写和无逐字稿生成纪要时会自动使用该 Provider。"
+                        />
+                      )}
+                    </div>
+                  </details>
+                </div>
+
+                <div className="meeting-current-summary">
+                  <div>
+                    <Space>
+                      <FileTextOutlined />
+                      <Text strong>当前会议</Text>
+                      {meeting && <Tag color={meetingStatusMeta(meeting.status).color}>{meetingStatusMeta(meeting.status).label}</Tag>}
+                    </Space>
+                    <div className="meeting-current-meta">
+                      {meeting ? (
+                        <Space wrap size={8}>
+                          <Text type="secondary">{formatMeetingTime(meeting.updatedAt || meeting.createdAt)}</Text>
+                          {meeting.audioOriginalName && <Text type="secondary">录音：{meeting.audioOriginalName}</Text>}
+                          {meeting.vaultRelativePath && <Tag color="green">{meeting.vaultRelativePath}</Tag>}
+                          {meeting.transcription?.error && <Tag color="warning">{meeting.transcription.error}</Tag>}
+                        </Space>
+                      ) : (
+                        <Text type="secondary">开始会议或导入录音后，这里会显示当前会议状态。</Text>
+                      )}
+                    </div>
+                  </div>
+                  <Space>
+                    {minutes && <Tag icon={<CheckCircleOutlined />} color="success">纪要可用</Tag>}
+                    {transcript && <Tag color="blue">逐字稿 {transcript.length} 字</Tag>}
+                  </Space>
+                </div>
+
                 <div className="meeting-history">
                   <div className="meeting-history-header">
                     <Space>
                       <FileTextOutlined />
-                      <Text strong>历史会议列表</Text>
+                      <Text strong>历史会议</Text>
                       <Tag>{meetingHistory.length}</Tag>
                     </Space>
-                    <Button size="small" icon={<ReloadOutlined />} loading={loadingMeetings} onClick={loadMeetingHistory}>
-                      刷新
-                    </Button>
+                    <Button size="small" icon={<ReloadOutlined />} loading={loadingMeetings} onClick={loadMeetingHistory}>刷新</Button>
                   </div>
                   <Spin spinning={loadingMeetings}>
                     {meetingHistory.length === 0 ? (
@@ -2501,54 +2720,55 @@ const DocumentWorkbench: React.FC = () => {
                       <List
                         size="small"
                         dataSource={meetingHistory}
-                        renderItem={item => (
-                          <List.Item
-                            actions={[
-                              <Button size="small" key="open" onClick={() => openMeetingFromHistory(item.id)}>打开</Button>,
-                              <Button
-                                size="small"
-                                key="retranscribe"
-                                disabled={!item.hasAudio}
-                                loading={retranscribingMeetingId === item.id}
-                                onClick={() => retranscribeMeeting(item)}
-                              >
-                                重新转写
-                              </Button>,
-                              <Button
-                                size="small"
-                                type="primary"
-                                key="regenerate"
-                                disabled={!item.hasTranscript && !item.hasAudio}
-                                loading={regeneratingMeetingId === item.id || (finalizing && meeting?.id === item.id)}
-                                onClick={() => regenerateMeetingMinutes(item)}
-                              >
-                                重新生成纪要
-                              </Button>
-                            ]}
-                          >
-                            <List.Item.Meta
-                              title={
-                                <Space wrap>
-                                  <span>{item.title}</span>
-                                  <Tag color={item.status === 'summarized' ? 'green' : item.status === 'transcribing' ? 'processing' : 'default'}>
-                                    {item.status}
-                                  </Tag>
-                                  {meeting?.id === item.id && <Tag color="blue">当前打开</Tag>}
-                                </Space>
-                              }
-                              description={
-                                <Space wrap size={8}>
-                                  <Text type="secondary">{formatMeetingTime(item.updatedAt || item.createdAt)}</Text>
-                                  {item.audioOriginalName && <Text type="secondary">录音：{item.audioOriginalName}</Text>}
-                                  {item.hasAudio && <Tag>录音</Tag>}
-                                  {item.hasTranscript && <Tag color="blue">逐字稿 {item.transcriptLength || 0} 字</Tag>}
-                                  {item.hasMinutes && <Tag color="green">纪要</Tag>}
-                                  {item.vaultRelativePath && <Text type="secondary">{item.vaultRelativePath}</Text>}
-                                </Space>
-                              }
-                            />
-                          </List.Item>
-                        )}
+                        renderItem={item => {
+                          const meta = meetingStatusMeta(item.status)
+                          return (
+                            <List.Item
+                              actions={[
+                                <Button size="small" key="open" onClick={() => openMeetingFromHistory(item.id)}>打开</Button>,
+                                <Button
+                                  size="small"
+                                  key="retranscribe"
+                                  disabled={!item.hasAudio}
+                                  loading={retranscribingMeetingId === item.id}
+                                  onClick={() => retranscribeMeeting(item)}
+                                >
+                                  转写
+                                </Button>,
+                                <Button
+                                  size="small"
+                                  type="primary"
+                                  key="regenerate"
+                                  disabled={!item.hasTranscript && !item.hasAudio}
+                                  loading={regeneratingMeetingId === item.id || (finalizing && meeting?.id === item.id)}
+                                  onClick={() => regenerateMeetingMinutes(item)}
+                                >
+                                  生成纪要
+                                </Button>
+                              ]}
+                            >
+                              <List.Item.Meta
+                                title={
+                                  <Space wrap>
+                                    <span>{item.title}</span>
+                                    <Tag color={meta.color}>{meta.label}</Tag>
+                                    {meeting?.id === item.id && <Tag color="blue">当前打开</Tag>}
+                                  </Space>
+                                }
+                                description={
+                                  <Space wrap size={8}>
+                                    <Text type="secondary">{formatMeetingTime(item.updatedAt || item.createdAt)}</Text>
+                                    {item.audioOriginalName && <Text type="secondary">录音：{item.audioOriginalName}</Text>}
+                                    {item.hasAudio && <Tag>录音</Tag>}
+                                    {item.hasTranscript && <Tag color="blue">逐字稿 {item.transcriptLength || 0} 字</Tag>}
+                                    {item.hasMinutes && <Tag color="green">纪要</Tag>}
+                                    {item.vaultRelativePath && <Text type="secondary">{item.vaultRelativePath}</Text>}
+                                  </Space>
+                                }
+                              />
+                            </List.Item>
+                          )
+                        }}
                       />
                     )}
                   </Spin>
@@ -2560,7 +2780,7 @@ const DocumentWorkbench: React.FC = () => {
                       value={transcript}
                       onChange={event => setTranscript(event.target.value)}
                       className="meeting-transcript"
-                      placeholder="实时识别或手动粘贴逐字稿"
+                      placeholder="录音时会追加实时识别文本；也可以在这里粘贴会议逐字稿，再生成纪要。"
                     />
                   </div>
                   <div className="meeting-panel">
@@ -2573,9 +2793,9 @@ const DocumentWorkbench: React.FC = () => {
                       <List
                         size="small"
                         dataSource={[
-                          meeting ? `会议：${meeting.title}` : '尚未创建会议',
-                          recording ? '录音中' : '空闲',
-                          transcript ? `已捕获 ${transcript.length} 字逐字稿` : '等待逐字稿'
+                          meeting ? `当前会议：${meeting.title}` : '尚未创建会议',
+                          recording ? '正在录音并尝试实时识别' : '等待录音、导入或逐字稿',
+                          transcript ? `已捕获 ${transcript.length} 字逐字稿` : '逐字稿准备好后即可生成纪要'
                         ]}
                         renderItem={item => <List.Item>{item}</List.Item>}
                       />

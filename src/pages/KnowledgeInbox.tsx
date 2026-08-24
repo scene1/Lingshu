@@ -157,7 +157,7 @@ const KnowledgeInbox: React.FC = () => {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [sourceFilter, setSourceFilter] = useState('')
-  const [vaultFolder, setVaultFolder] = useState('00_Inbox/灵枢知识流')
+  const [vaultFolder, setVaultFolder] = useState('灵枢/Inbox/知识流')
   const [automationSources, setAutomationSources] = useState<KnowledgeAutomationSource[]>([])
   const [automationLoading, setAutomationLoading] = useState(false)
   const [runningAutomationId, setRunningAutomationId] = useState('')
@@ -228,7 +228,7 @@ const KnowledgeInbox: React.FC = () => {
           tags: values.tags || []
         })
       })
-      message.success('已捕获到知识流 Inbox')
+      message.success('已添加到知识收件箱')
       setModalVisible(false)
       form.resetFields()
       await loadInbox()
@@ -426,8 +426,8 @@ const KnowledgeInbox: React.FC = () => {
         <Space>
           <InboxOutlined style={{ fontSize: 26, color: '#1677ff' }} />
           <div>
-            <Title level={3} style={{ margin: 0 }}>知识流 Inbox</Title>
-            <Text type="secondary">把信息先接住，再处理、确认、写入 Obsidian / Markdown Vault。</Text>
+            <Title level={3} style={{ margin: 0 }}>知识收件箱</Title>
+            <Text type="secondary">从对话、网页、会议和自动入口收集内容，确认后写入 Obsidian / Markdown Vault。</Text>
           </div>
         </Space>
         <Space>
@@ -441,8 +441,8 @@ const KnowledgeInbox: React.FC = () => {
         showIcon
         type="info"
         style={{ marginBottom: 16 }}
-        message="一期闭环：捕获 → 规则抽取 → 待确认 → 写入 Vault"
-        description="当前入口支持 RSS 去重、Webhook token 鉴权和 Cron 后台扫描；所有自动捕获内容仍先进入 Inbox，确认后才写入 Vault。"
+        message="入库闭环：收集 → 整理 → 确认 → 写入 Vault → 可被 AI 引用"
+        description="AI 对话里保存的内容、RSS / Webhook / Cron 自动捕获的内容都会先进入这里，避免未经确认的信息直接污染知识库。"
       />
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -461,7 +461,7 @@ const KnowledgeInbox: React.FC = () => {
       </Row>
 
       <Card
-        title="自动入口：RSS / Webhook / Cron"
+        title="自动收集：RSS / Webhook / Cron"
         extra={<Button size="small" icon={<ReloadOutlined />} loading={automationLoading} onClick={loadAutomationSources}>刷新入口</Button>}
         style={{ marginBottom: 16 }}
       >
@@ -499,11 +499,11 @@ const KnowledgeInbox: React.FC = () => {
             </Col>
             <Col xs={24}>
               <Form.Item name="instruction" label="处理说明">
-                <Input.TextArea rows={2} placeholder="可写过滤条件、摘要偏好，Cron 手动运行时会作为 Inbox 内容。" />
+                <Input.TextArea rows={2} placeholder="可写过滤条件、摘要偏好，Cron 手动运行时会作为收件箱内容。" />
               </Form.Item>
             </Col>
             <Col xs={24}>
-              <Button type="primary" htmlType="submit" icon={<PlusOutlined />}>新增自动入口</Button>
+              <Button type="primary" htmlType="submit" icon={<PlusOutlined />}>新增收集入口</Button>
             </Col>
           </Row>
         </Form>
@@ -557,7 +557,7 @@ const KnowledgeInbox: React.FC = () => {
             )}
           />
         ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无自动入口，可先添加 RSS 或 Webhook。" />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无自动收集入口，可先添加 RSS 或 Webhook。" />
         )}
       </Card>
 
@@ -595,7 +595,7 @@ const KnowledgeInbox: React.FC = () => {
               columns={columns}
               dataSource={items}
               pagination={{ pageSize: 10 }}
-              locale={{ emptyText: <Empty description="暂无 Inbox 条目，先捕获一条内容吧" /> }}
+              locale={{ emptyText: <Empty description="暂无收件箱内容，可先从 AI 对话保存一条回复。" /> }}
             />
           </Card>
         </Col>
@@ -655,7 +655,7 @@ const KnowledgeInbox: React.FC = () => {
       </Row>
 
       <Modal
-        title="捕获到知识流 Inbox"
+        title="添加到知识收件箱"
         open={modalVisible}
         onCancel={() => setModalVisible(false)}
         onOk={() => form.submit()}
