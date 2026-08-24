@@ -28,12 +28,7 @@ jobs:
   build-macos:
     needs: verify
     runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64, x64]
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -41,20 +36,49 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Configure Apple signing and notarization
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CSC_LINK" ]; then
+            echo "macOS signing enabled"
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            echo "macOS signing disabled: MAC_CSC_LINK is not configured"
+          fi
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "Apple notarization enabled"
+          else
+            echo "Apple notarization disabled: Apple credentials are incomplete"
+          fi
       - run: npm run build
       - run: npm run bundle:server
-      - run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+      - run: npx electron-builder --mac --arm64 --x64 --publish never
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos-${{ matrix.arch }}
+          name: release-macos
           path: |
             dist-electron/*.dmg
             dist-electron/*.zip
+            dist-electron/*.yml
+            dist-electron/*.blockmap
           if-no-files-found: error
 
   build-windows:
     needs: verify
     runs-on: windows-2022
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -62,21 +86,27 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Report Windows signing mode
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+        run: |
+          if ($env:CSC_LINK) { Write-Host "Windows signing enabled" }
+          else { Write-Host "Windows signing disabled: WIN_CSC_LINK is not configured" }
       - run: npm run build
       - run: npm run bundle:server
       - run: npx electron-builder --win --x64 --publish never
-      - name: Normalize Windows installer name
-        shell: pwsh
-        run: |
-          Get-ChildItem dist-electron -Filter *.exe | ForEach-Object {
-            Rename-Item $_.FullName ($_.BaseName + '-setup.exe')
-          }
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows-x64
           path: |
             dist-electron/*.exe
             dist-electron/*.zip
+            dist-electron/*.yml
+            dist-electron/*.blockmap
           if-no-files-found: error
 
   publish:
@@ -95,14 +125,14 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "title=灵枢 V${VERSION%.*}" >> "$GITHUB_OUTPUT"
+          echo "title=灵枢 V${VERSION}" >> "$GITHUB_OUTPUT"
           cd release-assets
           sha256sum Lingshu-* > "Lingshu-v${VERSION}-SHA256SUMS.txt"
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.meta.outputs.title }}
           tag_name: ${{ github.ref_name }}
-          body_path: deliverables/release-v2.0.0.md
+          body_path: deliverables/release-v2.0.1.md
           files: release-assets/*
           draft: false
           prerelease: false

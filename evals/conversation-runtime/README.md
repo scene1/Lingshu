@@ -12,3 +12,5 @@
 需要 LLM rubric 评分时，可另行运行 `npx promptfoo@latest eval -c evals/conversation-runtime/promptfooconfig.yaml`。默认脚本不会自动产生 60 次付费模型调用，只有显式运行评测命令才会调用模型。
 
 Promptfoo 只用于开发和 CI，不打包进 Electron 应用。
+
+GitHub Actions 的 `Conversation Regression` 支持手动选择模型和样本数。真实模型任务只有在勾选 `run_live` 且在 `cost_approval` 中填写 `APPROVE` 后才会执行；协议测试和构建验证不会产生模型调用费用。

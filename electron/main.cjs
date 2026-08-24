@@ -4,9 +4,7 @@ const fs = require('fs')
 const { fork, execFile } = require('child_process')
 const os = require('os')
 const http = require('http')
-
-// 禁用 Chromium 沙箱（未签名的打包应用在 macOS 上无法初始化沙箱）
-app.commandLine.appendSwitch('no-sandbox')
+const { autoUpdater } = require('electron-updater')
 
 // 设置应用名称（否则 macOS 菜单栏和 Dock 显示 "Electron"）
 app.setName('灵枢')
@@ -15,6 +13,18 @@ app.setName('灵枢')
 let mainWindow = null
 let backendProcess = null
 const appWindows = new Set()
+const UPDATE_REPOSITORY_URL = 'https://github.com/scene1/Lingshu/releases'
+let updateState = {
+  supported: false,
+  status: 'idle',
+  currentVersion: app.getVersion(),
+  availableVersion: '',
+  releaseDate: '',
+  progress: 0,
+  message: '尚未检查更新',
+  repositoryUrl: UPDATE_REPOSITORY_URL,
+  checkedAt: ''
+}
 
 // 后端端口
 const BACKEND_PORT = Number(process.env.LINGSHU_BACKEND_PORT || process.env.OPENCLAW_BACKEND_PORT || 3005)
@@ -63,6 +73,87 @@ function assertTrustedSender(event) {
   if (!isTrustedSender(event)) {
     throw new Error('Untrusted renderer origin')
   }
+}
+
+function publicUpdateState() {
+  return { ...updateState }
+}
+
+function broadcastUpdateState() {
+  for (const win of appWindows) {
+    if (!win.isDestroyed()) win.webContents.send('app-update-state', publicUpdateState())
+  }
+}
+
+function setUpdateState(patch) {
+  updateState = { ...updateState, ...patch }
+  broadcastUpdateState()
+  return publicUpdateState()
+}
+
+function updaterErrorMessage(error) {
+  const raw = String(error?.message || error || '')
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ERR_INTERNET_DISCONNECTED/i.test(raw)) {
+    return '无法连接更新服务，请检查网络后重试'
+  }
+  if (/404|latest(-mac)?\.yml/i.test(raw)) {
+    return '当前发布版本缺少更新元数据，请从 GitHub Releases 手动下载'
+  }
+  if (/signature|code sign|not signed/i.test(raw)) {
+    return '更新包签名验证失败，已停止安装'
+  }
+  return '检查更新失败，请稍后重试'
+}
+
+function configureAutoUpdater() {
+  const supported = app.isPackaged && ['darwin', 'win32'].includes(process.platform)
+  setUpdateState({
+    supported,
+    currentVersion: app.getVersion(),
+    status: supported ? 'idle' : 'unsupported',
+    message: supported ? '可检查 GitHub Release 更新' : '当前环境不支持应用内更新'
+  })
+  if (!supported) return
+
+  autoUpdater.autoDownload = false
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => {
+    setUpdateState({ status: 'checking', progress: 0, message: '正在检查更新...' })
+  })
+  autoUpdater.on('update-available', (info) => {
+    setUpdateState({
+      status: 'available',
+      availableVersion: String(info?.version || ''),
+      releaseDate: String(info?.releaseDate || ''),
+      checkedAt: new Date().toISOString(),
+      message: `发现新版本 v${info?.version || ''}`
+    })
+  })
+  autoUpdater.on('update-not-available', () => {
+    setUpdateState({
+      status: 'not-available',
+      availableVersion: '',
+      checkedAt: new Date().toISOString(),
+      message: `当前已是最新版本 v${app.getVersion()}`
+    })
+  })
+  autoUpdater.on('download-progress', (progress) => {
+    const percent = Math.max(0, Math.min(100, Number(progress?.percent || 0)))
+    setUpdateState({ status: 'downloading', progress: percent, message: `正在下载更新 ${Math.round(percent)}%` })
+  })
+  autoUpdater.on('update-downloaded', (info) => {
+    setUpdateState({
+      status: 'downloaded',
+      availableVersion: String(info?.version || updateState.availableVersion || ''),
+      progress: 100,
+      message: '更新已下载，重启后安装'
+    })
+  })
+  autoUpdater.on('error', (error) => {
+    console.error('自动更新失败:', error)
+    setUpdateState({ status: 'error', message: updaterErrorMessage(error) })
+  })
 }
 
 function isPathInside(parent, child) {
@@ -563,6 +654,44 @@ ipcMain.handle('get-system-info', async (event) => {
   }
 })
 
+ipcMain.handle('app-update:get-state', async (event) => {
+  assertTrustedSender(event)
+  return publicUpdateState()
+})
+
+ipcMain.handle('app-update:check', async (event) => {
+  assertTrustedSender(event)
+  if (!updateState.supported) return publicUpdateState()
+  if (['checking', 'downloading'].includes(updateState.status)) return publicUpdateState()
+  try {
+    await autoUpdater.checkForUpdates()
+  } catch (error) {
+    console.error('检查更新失败:', error)
+    setUpdateState({ status: 'error', message: updaterErrorMessage(error) })
+  }
+  return publicUpdateState()
+})
+
+ipcMain.handle('app-update:download', async (event) => {
+  assertTrustedSender(event)
+  if (updateState.status !== 'available') return publicUpdateState()
+  try {
+    setUpdateState({ status: 'downloading', progress: 0, message: '正在准备下载更新...' })
+    await autoUpdater.downloadUpdate()
+  } catch (error) {
+    console.error('下载更新失败:', error)
+    setUpdateState({ status: 'error', message: updaterErrorMessage(error) })
+  }
+  return publicUpdateState()
+})
+
+ipcMain.handle('app-update:install', async (event) => {
+  assertTrustedSender(event)
+  if (updateState.status !== 'downloaded') return { success: false, state: publicUpdateState() }
+  setImmediate(() => autoUpdater.quitAndInstall(false, true))
+  return { success: true, state: publicUpdateState() }
+})
+
 function registerDesktopShortcuts() {
   globalShortcut.unregisterAll()
 
@@ -605,6 +734,18 @@ app.whenReady().then(async () => {
   }
   createWindow({ backendReady })
   registerDesktopShortcuts()
+  configureAutoUpdater()
+
+  if (updateState.supported) {
+    setTimeout(() => {
+      if (updateState.status === 'idle') {
+        autoUpdater.checkForUpdates().catch((error) => {
+          console.error('启动更新检查失败:', error)
+          setUpdateState({ status: 'error', message: updaterErrorMessage(error) })
+        })
+      }
+    }, 10000)
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

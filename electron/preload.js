@@ -31,6 +31,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('desktop-action', listener)
     return () => ipcRenderer.removeListener('desktop-action', listener)
   },
+
+  // 更新地址由主进程固定，渲染进程只能触发受控动作
+  getUpdateState: () => ipcRenderer.invoke('app-update:get-state'),
+  checkForUpdates: () => ipcRenderer.invoke('app-update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('app-update:download'),
+  installUpdate: () => ipcRenderer.invoke('app-update:install'),
+  onUpdateState: (callback) => {
+    if (typeof callback !== 'function') return () => {}
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('app-update-state', listener)
+    return () => ipcRenderer.removeListener('app-update-state', listener)
+  },
   
   // 获取系统信息
   getSystemInfo: () => ipcRenderer.invoke('get-system-info'),

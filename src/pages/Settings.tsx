@@ -12,7 +12,18 @@ import {
   SaveOutlined, FolderOpenOutlined, SearchOutlined,
   GithubOutlined, BugOutlined, SyncOutlined, PictureOutlined, UploadOutlined
 } from '@ant-design/icons'
-import { getDesktopCapabilities, openExternal } from '../utils/electron'
+import packageJson from '../../package.json'
+import lingshuIcon from '../assets/lingshu-icon.png'
+import {
+  AppUpdateState,
+  checkForUpdates,
+  downloadUpdate,
+  getDesktopCapabilities,
+  getElectronAPI,
+  getUpdateState,
+  installUpdate,
+  openExternal
+} from '../utils/electron'
 import { PROVIDERS } from './ModelConfig'
 import { useSettings } from '../contexts/SettingsContext'
 
@@ -48,6 +59,8 @@ const Settings: React.FC = () => {
   const [savingIsolation, setSavingIsolation] = useState(false)
   const [desktopCapabilities, setDesktopCapabilities] = useState<any>(null)
   const [uploadingBackground, setUploadingBackground] = useState(false)
+  const [updateState, setUpdateState] = useState<AppUpdateState | null>(null)
+  const [updateActionLoading, setUpdateActionLoading] = useState(false)
   const [form] = Form.useForm()
   const { updateSettings } = useSettings()
   const defaultBackgroundSettings = {
@@ -94,7 +107,41 @@ const Settings: React.FC = () => {
     loadMemorySyncStatus()
     loadIsolationStatus()
     loadDesktopCapabilities()
+    getUpdateState().then(state => state && setUpdateState(state)).catch(() => {})
+    const disposeUpdateListener = getElectronAPI()?.onUpdateState?.(setUpdateState)
+    return () => disposeUpdateListener?.()
   }, [])
+
+  const handleCheckForUpdates = async () => {
+    setUpdateActionLoading(true)
+    try {
+      const state = await checkForUpdates()
+      if (state) setUpdateState(state)
+      else message.info('网页版不支持应用内更新，请从 GitHub Releases 下载桌面版')
+    } finally {
+      setUpdateActionLoading(false)
+    }
+  }
+
+  const handleDownloadUpdate = async () => {
+    setUpdateActionLoading(true)
+    try {
+      const state = await downloadUpdate()
+      if (state) setUpdateState(state)
+    } finally {
+      setUpdateActionLoading(false)
+    }
+  }
+
+  const handleInstallUpdate = async () => {
+    setUpdateActionLoading(true)
+    try {
+      const result = await installUpdate()
+      if (!result?.success) message.warning('更新尚未下载完成')
+    } finally {
+      setUpdateActionLoading(false)
+    }
+  }
 
   const loadSettings = async () => {
     try {
@@ -1317,10 +1364,10 @@ const Settings: React.FC = () => {
       <Card style={{ maxWidth: 500 }}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <RobotOutlined style={{ fontSize: 48, color: '#1890ff' }} />
+            <img src={lingshuIcon} alt="灵枢" width={56} height={56} style={{ objectFit: 'contain' }} />
             <div>
               <Title level={3} style={{ margin: 0 }}>灵枢</Title>
-              <Tag color="blue">v1.1.0</Tag>
+              <Tag color="blue">v{updateState?.currentVersion || packageJson.version}</Tag>
             </div>
           </div>
           <Divider />
@@ -1328,23 +1375,37 @@ const Settings: React.FC = () => {
             <Button
               type="primary"
               icon={<SyncOutlined />}
-              onClick={() => message.info('当前已是最新版本 v1.1.0')}
+              loading={updateActionLoading || updateState?.status === 'checking'}
+              disabled={updateState?.status === 'downloading'}
+              onClick={handleCheckForUpdates}
             >
               检查更新
             </Button>
+            {updateState?.status === 'available' && (
+              <Button loading={updateActionLoading} onClick={handleDownloadUpdate}>下载 v{updateState.availableVersion}</Button>
+            )}
+            {updateState?.status === 'downloaded' && (
+              <Button type="primary" loading={updateActionLoading} onClick={handleInstallUpdate}>重启并安装</Button>
+            )}
             <Button
               icon={<GithubOutlined />}
-              onClick={() => openExternal('https://github.com/lingshu-ai/lingshu')}
+              onClick={() => openExternal('https://github.com/scene1/Lingshu')}
             >
               GitHub
             </Button>
             <Button
               icon={<BugOutlined />}
-              onClick={() => openExternal('https://github.com/lingshu-ai/lingshu/issues')}
+              onClick={() => openExternal('https://github.com/scene1/Lingshu/issues')}
             >
               问题反馈
             </Button>
           </Space>
+          <Alert
+            type={updateState?.status === 'error' ? 'error' : updateState?.status === 'available' || updateState?.status === 'downloaded' ? 'info' : 'success'}
+            showIcon
+            message={updateState?.message || '桌面版支持从 GitHub Releases 检查更新'}
+            description={updateState?.status === 'downloading' ? `下载进度 ${Math.round(updateState.progress || 0)}%` : undefined}
+          />
           <Divider />
           <div>
             <Text strong>技术栈</Text>

@@ -14,6 +14,11 @@ declare global {
       openNewChatWindow: (route?: string) => Promise<{ success: boolean; error?: string }>
       showDesktopNotification: (payload: DesktopNotificationPayload) => Promise<{ success: boolean; error?: string }>
       onDesktopAction: (callback: (event: DesktopActionEvent) => void) => () => void
+      getUpdateState?: () => Promise<AppUpdateState>
+      checkForUpdates?: () => Promise<AppUpdateState>
+      downloadUpdate?: () => Promise<AppUpdateState>
+      installUpdate?: () => Promise<{ success: boolean; state: AppUpdateState }>
+      onUpdateState?: (callback: (state: AppUpdateState) => void) => () => void
       getSystemInfo: () => Promise<{ platform: string; arch: string; hostname: string; homedir: string; username: string }>
       isElectron: boolean
       platform: string
@@ -31,6 +36,11 @@ declare global {
       openNewChatWindow: (route?: string) => Promise<{ success: boolean; error?: string }>
       showDesktopNotification: (payload: DesktopNotificationPayload) => Promise<{ success: boolean; error?: string }>
       onDesktopAction: (callback: (event: DesktopActionEvent) => void) => () => void
+      getUpdateState?: () => Promise<AppUpdateState>
+      checkForUpdates?: () => Promise<AppUpdateState>
+      downloadUpdate?: () => Promise<AppUpdateState>
+      installUpdate?: () => Promise<{ success: boolean; state: AppUpdateState }>
+      onUpdateState?: (callback: (state: AppUpdateState) => void) => () => void
       getSystemInfo: () => Promise<{ platform: string; arch: string; hostname: string; homedir: string; username: string }>
       isElectron: boolean
       platform: string
@@ -81,6 +91,20 @@ export interface DesktopNotificationPayload {
   content?: string
   route?: string
   silent?: boolean
+}
+
+export type AppUpdateStatus = 'unsupported' | 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+
+export interface AppUpdateState {
+  supported: boolean
+  status: AppUpdateStatus
+  currentVersion: string
+  availableVersion?: string
+  releaseDate?: string
+  progress: number
+  message: string
+  repositoryUrl: string
+  checkedAt?: string
 }
 
 // 检测是否在 Electron 环境中
@@ -158,6 +182,22 @@ export const getDesktopCapabilities = async (): Promise<DesktopCapabilities | nu
   const api = getElectronAPI()
   if (!api?.getDesktopCapabilities) return null
   return api.getDesktopCapabilities()
+}
+
+export const getUpdateState = async (): Promise<AppUpdateState | null> => {
+  return getElectronAPI()?.getUpdateState?.() || null
+}
+
+export const checkForUpdates = async (): Promise<AppUpdateState | null> => {
+  return getElectronAPI()?.checkForUpdates?.() || null
+}
+
+export const downloadUpdate = async (): Promise<AppUpdateState | null> => {
+  return getElectronAPI()?.downloadUpdate?.() || null
+}
+
+export const installUpdate = async (): Promise<{ success: boolean; state: AppUpdateState } | null> => {
+  return getElectronAPI()?.installUpdate?.() || null
 }
 
 export const captureScreenshot = async (): Promise<DesktopScreenshotResult> => {
