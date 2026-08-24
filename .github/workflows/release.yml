@@ -13,7 +13,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  signing-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require production signing credentials
+        shell: bash
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in MAC_CSC_LINK MAC_CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID WIN_CSC_LINK WIN_CSC_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf 'Missing required release secrets: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          echo "Production signing and notarization credentials are configured."
+
   verify:
+    needs: signing-preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,17 +71,8 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -n "$CSC_LINK" ]; then
-            echo "macOS signing enabled"
-          else
-            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
-            echo "macOS signing disabled: MAC_CSC_LINK is not configured"
-          fi
-          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
-            echo "Apple notarization enabled"
-          else
-            echo "Apple notarization disabled: Apple credentials are incomplete"
-          fi
+          echo "macOS signing enabled"
+          echo "Apple notarization enabled"
       - run: npm run build
       - run: npm run bundle:server
       - run: npx electron-builder --mac --arm64 --x64 --publish never
@@ -91,8 +108,7 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
         run: |
-          if ($env:CSC_LINK) { Write-Host "Windows signing enabled" }
-          else { Write-Host "Windows signing disabled: WIN_CSC_LINK is not configured" }
+          Write-Host "Windows signing enabled"
       - run: npm run build
       - run: npm run bundle:server
       - run: npx electron-builder --win --x64 --publish never
