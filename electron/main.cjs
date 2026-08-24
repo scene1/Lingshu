@@ -97,7 +97,7 @@ function updaterErrorMessage(error) {
     return '无法连接更新服务，请检查网络后重试'
   }
   if (/404|latest(-mac)?\.yml/i.test(raw)) {
-    return '当前发布版本缺少更新元数据，请从 GitHub Releases 手动下载'
+    return '更新通道尚未发布完整元数据，请打开 GitHub Releases 查看可用版本'
   }
   if (/signature|code sign|not signed/i.test(raw)) {
     return '更新包签名验证失败，已停止安装'

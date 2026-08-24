@@ -12,6 +12,9 @@ V2.0.1 是桌面发布工程更新，重点补齐应用身份、版本一致性�
 - 移除 Chromium 全局 `--no-sandbox` 启动参数。
 - React Router 升级到 7.18.2，node-cron 升级到 4.6.0，生产依赖审计清零。
 - DeepSeek V4 Flash 完成 60 条真实评测，59 条通过，通过率 98.33%，质量门槛通过。
+- 发布工作流新增 Apple/Windows 独立签名预检、构建后验签和更新元数据完整性校验。
+- 修复旧版 Release 未上传 `latest-mac.yml`、`latest.yml` 与 blockmap 导致的应用内更新失败。
+- Electron 升级到 43.4.1、electron-builder 升级到 26.15.3、Vite 升级到 8.2.2，完整依赖审计清零。
 
 ## 更新策略
 

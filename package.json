@@ -4,6 +4,9 @@
   "description": "灵枢 - AI 路由与知识中枢",
   "author": "Lingshu Contributors",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/scene1/Lingshu.git"
@@ -24,12 +27,15 @@
     "electron:build:win": "npm run build && npm run bundle:server && electron-builder --win",
     "electron:build:linux": "npm run build && npm run bundle:server && electron-builder --linux",
     "bundle:server": "node scripts/build-server.mjs",
-    "test": "node --test server/core/*.test.js evals/conversation-runtime/*.test.js",
+    "test": "node --test server/core/*.test.js evals/conversation-runtime/*.test.js scripts/*.test.mjs",
     "test:runtime": "node --test server/core/conversation-runtime.test.js",
     "test:security": "node --test server/core/security.test.js",
     "test:eval-baseline": "node --test evals/conversation-runtime/*.test.js",
     "eval:conversation": "node evals/conversation-runtime/run-baseline.mjs",
     "eval:conversation:save": "node evals/conversation-runtime/save-report.mjs",
+    "release:signing:status": "bash scripts/configure-release-signing.sh status",
+    "release:signing:configure": "bash scripts/configure-release-signing.sh configure",
+    "release:assets:verify": "node scripts/verify-release-assets.mjs",
     "verify": "npm run build && npm run bundle:server"
   },
   "dependencies": {
@@ -62,12 +68,13 @@
     "@types/node-cron": "^3.0.11",
     "@types/react": "^18.3.29",
     "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^30.5.1",
-    "electron-builder": "^24.13.0",
-    "esbuild": "^0.21.5",
+    "@vitejs/plugin-react": "^6.1.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21"
+    "vite": "^8.2.2",
+    "yaml": "^2.9.0"
   },
   "build": {
     "appId": "com.lingshu.app",

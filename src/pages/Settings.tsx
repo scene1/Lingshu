@@ -10,7 +10,7 @@ import {
   ImportOutlined, DeleteOutlined, ClearOutlined, KeyOutlined,
   GlobalOutlined, CheckCircleOutlined, ExclamationCircleOutlined,
   SaveOutlined, FolderOpenOutlined, SearchOutlined,
-  GithubOutlined, BugOutlined, SyncOutlined, PictureOutlined, UploadOutlined
+  GithubOutlined, BugOutlined, SyncOutlined, PictureOutlined, UploadOutlined, DownloadOutlined
 } from '@ant-design/icons'
 import packageJson from '../../package.json'
 import {
@@ -1405,6 +1405,14 @@ const Settings: React.FC = () => {
             message={updateState?.message || '桌面版支持从 GitHub Releases 检查更新'}
             description={updateState?.status === 'downloading' ? `下载进度 ${Math.round(updateState.progress || 0)}%` : undefined}
           />
+          {updateState?.status === 'error' && (
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={() => openExternal(updateState.repositoryUrl || 'https://github.com/scene1/Lingshu/releases')}
+            >
+              打开发布下载页
+            </Button>
+          )}
           <Divider />
           <div>
             <Text strong>技术栈</Text>
@@ -1412,7 +1420,7 @@ const Settings: React.FC = () => {
               { label: 'React', value: '18.x' },
               { label: 'Ant Design', value: '5.x' },
               { label: 'Express', value: '4.x' },
-              { label: 'Vite', value: '5.x' },
+              { label: 'Vite', value: '8.x' },
               { label: 'TypeScript', value: '5.x' },
             ]} renderItem={item => (
               <List.Item style={{ padding: '4px 0' }}>

@@ -8,7 +8,9 @@ module.exports = async function notarizeMacApp(context) {
   const appleIdPassword = process.env.APPLE_APP_SPECIFIC_PASSWORD
   const teamId = process.env.APPLE_TEAM_ID
   if (!appleId || !appleIdPassword || !teamId) {
-    console.log('Apple notarization skipped: APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD or APPLE_TEAM_ID is missing.')
+    const message = 'Apple notarization requires APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID.'
+    if (process.env.CI) throw new Error(message)
+    console.log(`${message} Skipping notarization for this local build.`)
     return
   }
 
