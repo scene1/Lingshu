@@ -13,7 +13,6 @@ import {
   GithubOutlined, BugOutlined, SyncOutlined, PictureOutlined, UploadOutlined
 } from '@ant-design/icons'
 import packageJson from '../../package.json'
-import lingshuIcon from '../assets/lingshu-icon.png'
 import {
   AppUpdateState,
   checkForUpdates,
@@ -1364,7 +1363,7 @@ const Settings: React.FC = () => {
       <Card style={{ maxWidth: 500 }}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <img src={lingshuIcon} alt="灵枢" width={56} height={56} style={{ objectFit: 'contain' }} />
+            <RobotOutlined style={{ fontSize: 48, color: '#1890ff' }} />
             <div>
               <Title level={3} style={{ margin: 0 }}>灵枢</Title>
               <Tag color="blue">v{updateState?.currentVersion || packageJson.version}</Tag>

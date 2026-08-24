@@ -97,7 +97,6 @@
       "dist/**/*"
     ],
     "mac": {
-      "icon": "build/icon.icns",
       "artifactName": "Lingshu-v${version}-mac-${arch}.${ext}",
       "target": [
         {
@@ -117,7 +116,6 @@
       "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "win": {
-      "icon": "build/icon.ico",
       "artifactName": "Lingshu-v${version}-win-${arch}.${ext}",
       "target": [
         "nsis",

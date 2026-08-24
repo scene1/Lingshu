@@ -4,7 +4,6 @@ V2.0.1 是桌面发布工程更新，重点补齐应用身份、版本一致性�
 
 ## 本次更新
 
-- 新增灵枢专属 macOS 与 Windows 应用图标。
 - “关于”页改为读取真实应用版本，并修正 GitHub 与问题反馈地址。
 - 新增应用内更新检查、手动下载、下载进度和重启安装流程。
 - GitHub Release 新增 `latest.yml`、`latest-mac.yml` 和差分更新 `blockmap` 元数据。
